@@ -1,0 +1,11 @@
+{
+  "name": "shin620265",
+  "owner": { "name": "SHIN620265" },
+  "plugins": [
+    {
+      "name": "claude-pet",
+      "source": "./pet",
+      "description": "Desktop companion for Claude Code (Windows): per-session status cards + soft chimes for thinking / needs-input / done. Multilingual, with a /my-pet toggle."
+    }
+  ]
+}

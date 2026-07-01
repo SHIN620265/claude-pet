@@ -1,0 +1,23 @@
+# --- per-user runtime state (regenerated automatically; never commit) ---
+pet.pid
+pet-state.txt
+pet-pos.txt
+lang.txt
+sound.txt
+collapsed.flag
+events.log
+sessions/
+
+# --- backups / debug / temp ---
+*.bak
+i18ndbg*.txt
+tlang*.txt
+*.tmp
+
+# --- legacy files from earlier versions (unused by current code; safe to delete) ---
+signal.txt
+state.txt
+title.txt
+
+# Note: scripts, strings.json, the chimes (done.wav / attn.wav) and the
+# mascot frames (claude-*.png) ARE shipped, so they are intentionally tracked.
