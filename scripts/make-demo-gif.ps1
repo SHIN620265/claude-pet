@@ -2,7 +2,9 @@
 # screen capture. Reuses the real mascot PNGs (pet/claude-*.png) and replicates the
 # status-card look from pet-resident.ps1, then encodes with ffmpeg (palettegen).
 # Story: card 1 "Ship the release?" cycles  needs-input -> thinking -> done,  looping;
-# card 2 stays thinking (spinner), card 3 stays done. Requires ffmpeg on PATH.
+# card 2 stays thinking (spinner), card 3 stays done. Done cards carry the v1.0.7
+# model badge (different models per session); mid-turn cards never do.
+# Requires ffmpeg on PATH.
 Add-Type -AssemblyName System.Drawing
 
 $repo   = Split-Path $PSScriptRoot -Parent
@@ -53,10 +55,11 @@ function RoundRect($g,$x,$y,$w,$h,$r) {
   $p.AddArc($x+$w-$r,$y+$h-$r,$r,$r,0,90); $p.AddArc($x,$y+$h-$r,$r,$r,90,90); $p.CloseAllFigures()
   return $p
 }
-function DrawRow($g,$i,$title,$state,$detail,$key,$spinIdx) {
+function DrawRow($g,$i,$title,$state,$detail,$key,$spinIdx,$model) {
   $base = $cardY + $i*$rowH
   $g.DrawString($title, $fTitle, (New-Object System.Drawing.SolidBrush $titleC), ($cardX+$m), ($base + [int](5*$S)))
-  $line = if ($detail) { "$state  $mid  $detail" } else { $state }
+  $parts = @(); if ($model) { $parts += $model }; $parts += $state; if ($detail) { $parts += $detail }
+  $line = $parts -join "  $mid  "
   $g.DrawString($line, $fState, (New-Object System.Drawing.SolidBrush $col[$key]), ($cardX+$m), ($base + [int](26*$S)))
   $sx = $cardX + $cardW - $m - [int](17*$S); $sy = $base + [int](25*$S)
   $sb = New-Object System.Drawing.SolidBrush $col[$key]
@@ -92,14 +95,14 @@ for ($f = 0; $f -lt $N; $f++) {
   $path = RoundRect $g $cardX $cardY $cardW ($rowH*3) $rc
   $g.FillPath((New-Object System.Drawing.SolidBrush $cream), $path)
 
-  # row 0: the hero card, cycling
+  # row 0: the hero card, cycling; the model badge appears only once the turn is done
   switch ($phases[$f]) {
-    'attention' { DrawRow $g 0 'Ship the release?' 'Needs your input' 'waiting for your OK' 'attention' 0 }
-    'thinking'  { DrawRow $g 0 'Ship the release?' 'Thinking' 'applying your changes' 'thinking' $f }
-    'done'      { DrawRow $g 0 'Ship the release?' 'Done' 'released' 'done' 0 }
+    'attention' { DrawRow $g 0 'Ship the release?' 'Needs your input' 'waiting for your OK' 'attention' 0 '' }
+    'thinking'  { DrawRow $g 0 'Ship the release?' 'Thinking' 'applying your changes' 'thinking' $f '' }
+    'done'      { DrawRow $g 0 'Ship the release?' 'Done' 'released' 'done' 0 'Opus 4.8' }
   }
-  DrawRow $g 1 'Refactor the auth module' 'Thinking' 'reading the codebase' 'thinking' ($f+3)
-  DrawRow $g 2 'Run the test suite' 'Done' '42 passed, 0 failed' 'done' 0
+  DrawRow $g 1 'Refactor the auth module' 'Thinking' 'reading the codebase' 'thinking' ($f+3) ''
+  DrawRow $g 2 'Run the test suite' 'Done' '42 passed, 0 failed' 'done' 0 'Fable 5'
 
   $g.Dispose()
   $bmp.Save((Join-Path $tmp ('f{0:D3}.png' -f $f)), [System.Drawing.Imaging.ImageFormat]::Png)
