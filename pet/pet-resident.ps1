@@ -413,8 +413,10 @@ function Update-Card {
         $s = $list[$i]
         $lab = L $s.key $s.label
         $rowTitle[$i].Text = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
-        # status line: [model of the session's last reply] . state . latest input
-        $parts = @(); if ($s.model) { $parts += $s.model }; $parts += $lab; if ($s.detail) { $parts += $s.detail }
+        # status line: [model badge, post-turn states only] . state . detail
+        # mid-turn (thinking/attention) the badge would read as "the model currently
+        # running", which we cannot truthfully know -- so it only renders on done/idle
+        $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle')) { $parts += $s.model }; $parts += $lab; if ($s.detail) { $parts += $s.detail }
         $rowState[$i].Text = ($parts -join "  $([char]0x00B7)  ")
         $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
         $rowState[$i].ForeColor = $col

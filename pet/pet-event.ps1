@@ -31,33 +31,73 @@ function ExistingModel { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Co
 # model shown on the card = the model of this session's LAST reply, parsed from the
 # transcript tail. Honest per-session semantics: never claims "current model" (hooks
 # don't expose one), so multiple sessions on different models each show their own;
-# after /model the badge catches up with the next assistant message.
-function ModelFromTranscript($tp) {
-  if (-not $tp -or -not (Test-Path $tp)) { return '' }
+# after /model the badge catches up with the next assistant message. The resident
+# renders the badge only for post-turn states (done/idle) -- mid-turn it would read
+# as "the model currently thinking", which nothing can truthfully claim.
+function ModelShortName($id) {
+  $m = [regex]::Match([string]$id, 'claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?!\d)')   # (?!\d) keeps date suffixes out
+  if (-not $m.Success) { return '' }
+  $fam = $m.Groups[1].Value; $fam = $fam.Substring(0,1).ToUpper() + $fam.Substring(1)
+  $v = $m.Groups[2].Value; if ($m.Groups[3].Success) { $v = "$v.$($m.Groups[3].Value)" }
+  return "$fam $v"
+}
+function ReadTranscriptTail($tp) {
+  if (-not $tp -or -not (Test-Path $tp)) { return $null }
   try {
     $fs = [IO.File]::Open($tp, 'Open', 'Read', 'ReadWrite')
-    $take = [Math]::Min($fs.Length, 262144)
-    if ($take -le 0) { $fs.Dispose(); return '' }
+    $flen = $fs.Length
+    $take = [Math]::Min($flen, 262144)
+    if ($take -le 0) { $fs.Dispose(); return $null }
     [void]$fs.Seek(-$take, 'End')
     $buf = New-Object byte[] $take; [void]$fs.Read($buf, 0, $take); $fs.Dispose()
-    $txt = [Text.Encoding]::UTF8.GetString($buf)
-    $ms = [regex]::Matches($txt, '"model"\s*:\s*"([^"]*claude-[a-z0-9.-]+)"')   # anchored to the JSON field, not free text
-    if ($ms.Count -eq 0) { return '' }
-    $id = $ms[$ms.Count - 1].Groups[1].Value
-    $m = [regex]::Match($id, 'claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?!\d)')      # (?!\d) keeps date suffixes out
-    if (-not $m.Success) { return '' }
-    $fam = $m.Groups[1].Value; $fam = $fam.Substring(0,1).ToUpper() + $fam.Substring(1)
-    $v = $m.Groups[2].Value; if ($m.Groups[3].Success) { $v = "$v.$($m.Groups[3].Value)" }
-    return "$fam $v"
-  } catch { return '' }
+    return @{ text = [Text.Encoding]::UTF8.GetString($buf); windowed = ($take -lt $flen) }
+  } catch { return $null }
+}
+function ModelFromTranscript($tp) {
+  $tail = ReadTranscriptTail $tp
+  if (-not $tail) { return '' }
+  $ms = [regex]::Matches($tail.text, '"model"\s*:\s*"([^"]*claude-[a-z0-9.-]+)"')   # anchored to the JSON field, not free text
+  if ($ms.Count -eq 0) { return '' }
+  return ModelShortName $ms[$ms.Count - 1].Groups[1].Value
+}
+# The done card shows the reply's first line + the model of the SAME assistant entry,
+# so the badge always labels the text it actually produced. Skips sidechain (subagent)
+# entries and tool_use-only entries; returns $null when nothing usable is in the tail.
+function LastReplyFromTranscript($tp) {
+  $tail = ReadTranscriptTail $tp
+  if (-not $tail) { return $null }
+  $lines = $tail.text -split "`n"
+  $start = $(if ($tail.windowed) { 1 } else { 0 })   # windowed read: first line may be cut mid-JSON
+  for ($i = $lines.Count - 1; $i -ge $start; $i--) {
+    $ln = $lines[$i]
+    if ($ln -notmatch '"type"\s*:\s*"assistant"') { continue }
+    if ($ln -match '"isSidechain"\s*:\s*true') { continue }
+    $o = $null; try { $o = $ln | ConvertFrom-Json } catch { continue }
+    if (-not $o -or -not $o.message -or -not $o.message.content) { continue }
+    $tb = @($o.message.content) | Where-Object { $_.type -eq 'text' -and $_.text } | Select-Object -First 1
+    if (-not $tb) { continue }
+    $line = ''
+    foreach ($cand in ($tb.text -split "`n")) {
+      if ($cand -match '^\s*#') { continue }   # headings label sections, they are not the lede
+      $t = ($cand -replace '\s+', ' ').Trim()
+      $t = ($t -replace '^(?:>\s*|[-*]\s+|\d+\.\s+)+', '') -replace '[`*]+', ''   # shed markdown lead-ins/emphasis
+      $t = $t.Trim()
+      if ($t) { $line = $t; break }
+    }
+    if (-not $line) { continue }
+    if ($line.Length -gt 60) { $line = $line.Substring(0, 60) + [char]0x2026 }
+    return @{ text = $line; model = (ModelShortName ([string]$o.message.model)) }
+  }
+  return $null
 }
 $tp = ''; if ($j) { $tp = [string]$j.transcript_path }
 $mdl = ModelFromTranscript $tp
 if (-not $mdl) { $mdl = ExistingModel }   # events without transcript_path keep the badge
 
-function WriteSession($key, $label, $title, $detail) {
+function WriteSession($key, $label, $title, $detail, $model) {
+  if (-not $model) { $model = $mdl }
   $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-  $rec = ($key, $label, $title, $detail, "$epoch", $mdl) -join "`t"
+  $rec = ($key, $label, $title, $detail, "$epoch", $model) -join "`t"
   [IO.File]::WriteAllText($file, $rec, (New-Object Text.UTF8Encoding($false)))
 }
 $projOr = $proj   # may be empty; the resident localizes an empty title to "new session"
@@ -116,7 +156,11 @@ switch ($Event) {
     WriteSession 'attention' '需要你确认 / 选择' (TitleOr) (ExistingDetail)
   }
   'done' {
-    WriteSession 'done' '已完成' (TitleOr) (ExistingDetail)
+    # turn is over -> swap "your words" for the reply's first line, badge from the same
+    # entry; on extraction failure fall back to the v1.0.6 behavior (no regression)
+    $r = LastReplyFromTranscript $tp
+    if ($r -and $r.text) { WriteSession 'done' '已完成' (TitleOr) $r.text $r.model }
+    else { WriteSession 'done' '已完成' (TitleOr) (ExistingDetail) }
   }
   'busy' {
     # a tool ran (e.g. right after you approved) -> back to thinking, keep the title

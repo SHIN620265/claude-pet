@@ -29,7 +29,7 @@
 - **沙箱**:`cmd /c` 可能被拦;给子进程喂 stdin 用管道或 `Start-Process -RedirectStandardInput`。
 - **会话状态文件格式**(`sessions\<id>`,单行,TAB 分隔):
   `key <TAB> label <TAB> title <TAB> detail <TAB> epochMillis <TAB> model`
-  - `key` ∈ `thinking|attention|done|idle`(决定颜色/图标/本地化文案);`label` 已被常驻忽略(按 key 本地化),填占位即可;`title`=卡片标题;`detail`=状态行后半句;`model`(可空)=该会话上一条回复的模型短名(如 `Fable 5`),显示为状态行前缀,老格式(5 字段)兼容。
+  - `key` ∈ `thinking|attention|done|idle`(决定颜色/图标/本地化文案);`label` 已被常驻忽略(按 key 本地化),填占位即可;`title`=卡片标题;`detail`=状态行后半句(思考/需确认时=你最近一句输入,**done 时=回复首句摘要**);`model`(可空)=该会话上一条回复的模型短名(如 `Fable 5`),**仅在 done/idle 态**渲染为状态行前缀,老格式(5 字段)兼容。
 
 ---
 
@@ -129,7 +129,8 @@ public static class Q{
 | T20 | 资产随版本刷新 | `(Get-Item "$code\strings.json").LastWriteTime = Get-Date`,重启常驻 | `$data\strings.json` 被覆盖(mtime 变新);内容与 `$code` 一致 |
 | T21 | 低延迟(FSW) | 注入一个 attention 会话文件,立即截图 | 卡片近即时更新(≤0.5s,FileSystemWatcher;120ms 轮询仅兜底) |
 | T22 | 即时"需确认"(PermissionRequest) | 真实触发一个权限弹窗,掐表看卡片变琥珀 | ≤1.5s(不等 Notification 的 6s 防打扰);被 allowlist 自动放行的命令**不得**出 attention 卡;6s 后 Notification 兜底到来不得重响提示音 |
-| T23 | 模型徽标 | 造一个尾行含 `"model":"claude-fable-5"` 的假 transcript,触发 `prompt`(stdin 带 `transcript_path`);再注入 5 字段老格式卡 | 状态行显示 `Fable 5 · 状态 · detail`;老格式卡无前缀不报错;无 transcript 的事件(如 permreq)保留已有徽标;正文里提到的模型 ID **不得**被误认(必须只认 `"model":"…"` JSON 字段) |
+| T23 | 模型徽标(仅回合结束态) | 注入带 model 字段的 done / thinking / attention 卡各一张;再注入 5 字段老格式卡 | done 卡显示 `Fable 5 · 已完成 · …`;thinking/attention 卡**不显示**徽标(即使 model 字段有值);老格式卡不报错;无 transcript 的事件(如 permreq)保留已有徽标字段 |
+| T24 | 完成卡=回复摘要(同源) | 造假 transcript:主线 assistant(text+model)在前、`isSidechain:true` 条目在后、结尾再放纯 tool_use 条目,触发 `done` | detail=主线回复首句(剥 markdown、截 60);model 与该条**同源**;sidechain 与 tool_use 条目被跳过;把 text 块全删再触发 `done` → 回退保留原 detail/model;正文提到的模型 ID 不得干扰 |
 
 **T12 找宠物窗口并踩到底层的片段**
 ```powershell

@@ -42,10 +42,12 @@
   FileSystemWatcher 即刻渲染;纯观察且不怕乱序的钩子标 `async` 免拖慢主流程;钩子一律用 **exec 直启形式**
   (`command`+`args` 数组)——字符串 command 会先起一层 wrapper shell(Git Bash,实测 60-730ms)再启 pwsh,
   exec 形式把这层砍掉;剩余地板是 pwsh 冷启动(实测 ~0.6-1.2s,方差来自杀软)。
-- 模型徽标语义是**"该会话上一条回复的模型"**,不是"当前模型"——钩子 payload 不含 model 字段,settings 里只有
-  全局默认(多会话会张冠李戴),唯一每会话真实来源是 transcript(`transcript_path`)尾部最后一个
-  `"model":"…"` JSON 字段(只认 JSON 字段、不匹配正文自由文本,防止对话内容里提到的模型 ID 误入);
-  `/model` 切换后徽标随下一条 assistant 消息自动跟上,事件缺 transcript 时保留旧徽标。
+- 模型徽标**只在回合结束态(done/idle)渲染**,回合中(thinking/attention)一律隐藏——正在跑的模型平台不暴露
+  (钩子 payload 无 model 字段,settings 只有全局默认),显示"上一条的模型"会被读成"正在思考的模型"而误导。
+- done 卡的 detail = **回复首句摘要**,与徽标取自 transcript(`transcript_path`)尾部**同一条** assistant 消息
+  (同源:徽标标注的正是产出这段文字的模型);提取跳过 `isSidechain` 子代理条目与纯 tool_use 条目,只认
+  `"model":"…"` JSON 字段防正文误匹配;提取失败回退 v1.0.6 行为(保留原 detail+正则取模型),事件缺
+  transcript 时保留旧徽标;`/model` 切换后徽标随下一条回复自动跟上。
 
 ## 踩过的坑(重要)
 1. **5.1 编码**:常驻用 `powershell.exe`(WinForms 需 STA)。5.1 把无 BOM 的 UTF-8 当 GBK 读 →
