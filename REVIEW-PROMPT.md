@@ -60,7 +60,7 @@ $sd="$HOME\.claude\pet-data\sessions"; $e=[long]([DateTimeOffset]::UtcNow.ToUnix
 **触发一个真实钩子(带 stdin JSON,UTF-8)**
 ```powershell
 '{"session_id":"t_hook","cwd":"D:\\path\\myproject","prompt":"做一个功能"}' | pwsh -NoProfile -ExecutionPolicy Bypass -File "$code\pet-event.ps1" prompt
-# 其它事件:done / busy(PostToolUse 触发,不挂 PreToolUse——它在权限弹窗前触发,复位不了 attention)/ attention(需 message/type)/ idle / end
+# 其它事件:done / busy(PostToolUse/PermissionDenied)/ permreq(PermissionRequest,即时 attention)/ attention(Notification 兜底,需 message/type)/ idle / end
 # SessionStart:把 source 设 compact/clear/startup 测标题保留/重置
 '{"session_id":"t_hook","cwd":"D:\\path\\myproject","source":"compact"}' | pwsh -NoProfile -File "$code\pet-session-start.ps1"
 ```
@@ -128,6 +128,7 @@ public static class Q{
 | T19 | PID 复用安全 | 起一个无关 `powershell -Command Start-Sleep 60`,把它的 PID 写入 `$data\pet.pid`,跑 `pet-toggle.ps1` | 无关进程**不被杀**;toggle 视为"未运行",输出 `on` 并拉起新宠物 |
 | T20 | 资产随版本刷新 | `(Get-Item "$code\strings.json").LastWriteTime = Get-Date`,重启常驻 | `$data\strings.json` 被覆盖(mtime 变新);内容与 `$code` 一致 |
 | T21 | 低延迟(FSW) | 注入一个 attention 会话文件,立即截图 | 卡片近即时更新(≤0.5s,FileSystemWatcher;120ms 轮询仅兜底) |
+| T22 | 即时"需确认"(PermissionRequest) | 真实触发一个权限弹窗,掐表看卡片变琥珀 | ≤1.5s(不等 Notification 的 6s 防打扰);被 allowlist 自动放行的命令**不得**出 attention 卡;6s 后 Notification 兜底到来不得重响提示音 |
 
 **T12 找宠物窗口并踩到底层的片段**
 ```powershell
@@ -160,6 +161,7 @@ Start-Sleep -Milliseconds 2600; "after2.6s=$([WZ]::IsTop($h))  # 期望 True"
 7. **空闲误报**:Notification 的 idle/auth/elicitation 必须过滤(T14)。
 8. **PID 复用误杀 / 双实例**:toggle、session-start 必须先核验进程身份再 Stop/认定在跑(T19);常驻必须持命名 Mutex(T16)。
 9. **删错钩子**:busy 必须挂 PostToolUse(权限批准后复位 attention 的唯一钩子);PreToolUse 在弹窗前触发,挂它等于批准后无人复位(1.0.2 踩过,T14)。
+10. **权限通知的 6 秒**: "需确认"即时性必须靠 PermissionRequest 钩子(async);Notification 有 Claude Code 内置 6s 防打扰延迟,只能当兜底(T22)。
 
 ---
 

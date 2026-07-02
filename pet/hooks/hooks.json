@@ -12,6 +12,12 @@
     "PostToolUse": [
       { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" busy" } ] }
     ],
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" permreq", "async": true } ] }
+    ],
+    "PermissionDenied": [
+      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" busy", "async": true } ] }
+    ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" done" } ] }
     ],

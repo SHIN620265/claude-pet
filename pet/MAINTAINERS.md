@@ -23,7 +23,8 @@
 - 钩子驱动状态(插件 `hooks/hooks.json`,所有会话/终端通用):`SessionStart`登记+拉起、`UserPromptSubmit`thinking+取首句标题、
   `PostToolUse`busy(工具跑完即把 attention 复位;**不挂 PreToolUse**——它在权限弹窗**之前**触发,复位不了"需确认",
   只会让每次工具调用多一次 pwsh 冷启动,还把权限弹窗往后垫)、
-  `Stop`done、`Notification`attention(过滤空闲误报)、`SessionEnd`撤卡。
+  `PermissionRequest`attention(**即时**,`async` 后台跑不拖慢弹窗)、`PermissionDenied`busy(拒绝后你已不被需要)、
+  `Stop`done、`Notification`attention(**兜底**——Claude Code 对权限通知有 6s 防打扰延迟,见坑 10;过滤空闲误报)、`SessionEnd`撤卡。
 - 常驻用 FileSystemWatcher 即时感知 `sessions\` 变化(~120ms 轮询兜底)渲染卡片;每 60ms 跑动画;每 ~2s 查 `Get-Process claude`,无则自杀。
 - 与终端无关:宠物是独立桌面进程,只认进程名 `claude.exe`,钩子在自己的 pwsh 里跑。
 
@@ -37,7 +38,8 @@
   才 Stop / 认定在跑——防崩溃/重启后 PID 被系统复用时误杀无关进程或误判"已在运行"。
 - 资产随版本刷新:插件目录副本比 `pet-data` 副本新(mtime)即覆盖镜像,发新版改文案/音效对老用户生效。
 - `events.log` 上限 256KB,超限重建,不无界增长。
-- 低延迟:钩子写文件 → FileSystemWatcher 即刻触发渲染;剩余延迟地板是钩子 pwsh 冷启动(~0.2-0.4s)。
+- 低延迟:"需确认"走 `PermissionRequest`(弹窗即触发)而非等 Notification 的 6s 防打扰;钩子写文件 →
+  FileSystemWatcher 即刻渲染;纯观察且不怕乱序的钩子标 `async` 免拖慢主流程;剩余地板是 pwsh 冷启动(实测 ~0.7-1s)。
 
 ## 踩过的坑(重要)
 1. **5.1 编码**:常驻用 `powershell.exe`(WinForms 需 STA)。5.1 把无 BOM 的 UTF-8 当 GBK 读 →
@@ -57,6 +59,10 @@
 9. **PreToolUse 在权限弹窗"之前"触发**(所以钩子才能代替用户放行/拦截),别指望它把 attention 复位——
    复位"需确认→思考中"的只能是 `PostToolUse`(工具跑完)。1.0.2 曾删错钩子(留 Pre 删 Post),
    导致用户批准后卡片长时间滞留"需要你确认/选择",1.0.3 修正。
+10. **Notification 的权限通知天生慢 6 秒**:Claude Code 源码里权限弹窗挂载后要等 `ZTc=6000ms`(防打扰,
+    6 秒内已响应则不发,不可配置)才发 Notification。"需确认"的即时性靠 `PermissionRequest` 钩子(弹窗即触发,
+    1.0.4 引入);Notification 仅作兜底,两者写同一 key,幂等不重响。`async` 只用于纯观察钩子——
+    `done`/`busy` 这类有先后语义的保持同步,防止乱序覆盖(如 Stop 的 done 被迟到的 busy 冲掉)。
 
 ## 常用命令
 ```powershell

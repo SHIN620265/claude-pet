@@ -79,6 +79,13 @@ switch ($Event) {
     Remove-Item $collapse -Force -ErrorAction SilentlyContinue
     WriteSession 'attention' '需要你确认 / 选择' (TitleOr) (ExistingDetail)
   }
+  'permreq' {
+    # PermissionRequest hook: fires the moment a permission dialog is shown -- ~6s earlier
+    # than the Notification path (Claude Code delays that one by design, ZTc=6000ms).
+    # The later Notification rewrites the same key, which is idempotent (no second chime).
+    Remove-Item $collapse -Force -ErrorAction SilentlyContinue
+    WriteSession 'attention' '需要你确认 / 选择' (TitleOr) (ExistingDetail)
+  }
   'done' {
     WriteSession 'done' '已完成' (TitleOr) (ExistingDetail)
   }
