@@ -4,7 +4,7 @@
 A little desktop mascot that watches your Claude Code progress for you.
 Claude Code の進捗を見守る、デスクトップの小さなマスコット。
 
-<p align="center"><img src="docs/pet.png" width="300" alt="Claude Desktop Pet — status cards for thinking / needs-input / done"></p>
+<p align="center"><img src="docs/demo.gif" width="420" alt="Claude Desktop Pet — a status card cycling through needs-your-input → thinking → done, with the mascot reacting"></p>
 
 **语言 / Language / 言語:** [中文](#中文) ・ [English](#english) ・ [日本語](#日本語)
 
