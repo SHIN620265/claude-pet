@@ -1,28 +1,28 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-session-start.ps1\"" } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-session-start.ps1"] } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" end" } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "end"] } ] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" prompt" } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "prompt"] } ] }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" busy" } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "busy"] } ] }
     ],
     "PermissionRequest": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" permreq", "async": true } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "permreq"], "async": true } ] }
     ],
     "PermissionDenied": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" busy", "async": true } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "busy"], "async": true } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" done" } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "done"] } ] }
     ],
     "Notification": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" attention" } ] }
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "attention"] } ] }
     ]
   }
 }
