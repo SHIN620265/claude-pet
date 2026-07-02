@@ -60,7 +60,7 @@ $sd="$HOME\.claude\pet-data\sessions"; $e=[long]([DateTimeOffset]::UtcNow.ToUnix
 **触发一个真实钩子(带 stdin JSON,UTF-8)**
 ```powershell
 '{"session_id":"t_hook","cwd":"D:\\path\\myproject","prompt":"做一个功能"}' | pwsh -NoProfile -ExecutionPolicy Bypass -File "$code\pet-event.ps1" prompt
-# 其它事件:done / busy(PreToolUse 触发,已无 PostToolUse)/ attention(需 message/type)/ idle / end
+# 其它事件:done / busy(PostToolUse 触发,不挂 PreToolUse——它在权限弹窗前触发,复位不了 attention)/ attention(需 message/type)/ idle / end
 # SessionStart:把 source 设 compact/clear/startup 测标题保留/重置
 '{"session_id":"t_hook","cwd":"D:\\path\\myproject","source":"compact"}' | pwsh -NoProfile -File "$code\pet-session-start.ps1"
 ```
@@ -120,13 +120,14 @@ public static class Q{
 | T11 | 减少动画 | 关 Windows 动画(设置→辅助功能→视觉效果→动画效果),`[Q]::AN()`=0 | 宠物停浮动/眨眼;转圈变静态「…」;开回动画恢复(≤3s) |
 | T12 | 置顶不被压 | 见 §3 末"找宠物窗口并踩到底层"片段 | 被降级后 ≤2s 自动重新置顶;但 NS≠5 时不强抢 |
 | T13 | 多语种 | `lang.txt` 设 zh/en/ja/auto 重启;右键「语言」即时切 | 状态/菜单本地化正确;卡片标题(你的输入)**不翻译**;auto 跟随系统 |
-| T14 | 钩子映射 | 逐个触发 prompt/busy/done/attention/idle/end(busy=PreToolUse,hooks.json 不得含 PostToolUse) | 状态正确流转;`waiting for`/idle_prompt/auth_success/elicitation_* 被过滤不弹 |
+| T14 | 钩子映射 | 逐个触发 prompt/busy/done/attention/idle/end(busy=PostToolUse,hooks.json 不得含 PreToolUse) | 状态正确流转;`waiting for`/idle_prompt/auth_success/elicitation_* 被过滤不弹 |
 | T15 | 编码 | 看菜单「关闭宠物」「·」分隔、中文卡片 | 无乱码(无「路」等) |
 | T16 | 单实例(Mutex) | 直接**并发**启动 2 个 `pet-resident.ps1`(或先删常驻再并发 2 次 SessionStart) | ~3s 后只剩 1 个 `pet-resident.ps1` 进程,第二个静默自退 |
 | T17 | 多界面并存 | 在 WT/VS Code 终端/PowerShell 同时开 Claude | 各自一张卡;任一 claude.exe 在即不退 |
 | T18 | (发布前)可移植性 | 全仓搜 `C:\Users\` 一类写死绝对路径 | 报告所有写死的绝对路径(应为 `$PSScriptRoot`/`$env:USERPROFILE`) |
 | T19 | PID 复用安全 | 起一个无关 `powershell -Command Start-Sleep 60`,把它的 PID 写入 `$data\pet.pid`,跑 `pet-toggle.ps1` | 无关进程**不被杀**;toggle 视为"未运行",输出 `on` 并拉起新宠物 |
 | T20 | 资产随版本刷新 | `(Get-Item "$code\strings.json").LastWriteTime = Get-Date`,重启常驻 | `$data\strings.json` 被覆盖(mtime 变新);内容与 `$code` 一致 |
+| T21 | 低延迟(FSW) | 注入一个 attention 会话文件,立即截图 | 卡片近即时更新(≤0.5s,FileSystemWatcher;120ms 轮询仅兜底) |
 
 **T12 找宠物窗口并踩到底层的片段**
 ```powershell
@@ -158,6 +159,7 @@ Start-Sleep -Milliseconds 2600; "after2.6s=$([WZ]::IsTop($h))  # 期望 True"
 6. **重启不重复叮**:常驻重启首轮应静音(`firstPoll`),不要把已有 done/attention 重播(T8)。
 7. **空闲误报**:Notification 的 idle/auth/elicitation 必须过滤(T14)。
 8. **PID 复用误杀 / 双实例**:toggle、session-start 必须先核验进程身份再 Stop/认定在跑(T19);常驻必须持命名 Mutex(T16)。
+9. **删错钩子**:busy 必须挂 PostToolUse(权限批准后复位 attention 的唯一钩子);PreToolUse 在弹窗前触发,挂它等于批准后无人复位(1.0.2 踩过,T14)。
 
 ---
 

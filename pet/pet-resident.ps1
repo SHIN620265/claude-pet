@@ -350,6 +350,7 @@ $script:animOn = $true; try { $script:animOn = [Lp]::AnimationsOn() } catch {}; 
 $script:lastTop = $now0
 $script:cardShown = $false; $script:cardH = $rowH; $script:lastSig = '__'; $script:hoverRow = -2; $script:xHoverIdx = -1
 $script:lastKeys = @{}; $script:rowKeys = New-Object 'string[]' $MAXROWS; $script:rowSids = New-Object 'string[]' $MAXROWS; $script:firstPoll = $true
+$script:fsDirty = $false
 $script:editing = $false; $script:editSid = ''
 $spinChars = @(0x280B,0x2819,0x2839,0x2838,0x283C,0x2834,0x2826,0x2827,0x2807,0x280F) | ForEach-Object { [char]$_ }
 $checkChar = [char]0x2713
@@ -446,11 +447,21 @@ $form.add_MouseUp({ param($s,$e)
 })
 $form.add_DoubleClick({ if (Test-Path $collapsePath) { Remove-Item $collapsePath -Force } else { New-Item -ItemType File $collapsePath -Force | Out-Null } })
 
+# react to session file changes instantly instead of waiting for the next poll;
+# SynchronizingObject marshals the events onto the UI thread, the 120ms poll stays as fallback
+$fsw = New-Object System.IO.FileSystemWatcher $sessDir
+$fsw.IncludeSubdirectories = $false
+$fsw.NotifyFilter = [System.IO.NotifyFilters]'FileName, LastWrite'
+$fsw.SynchronizingObject = $form
+$fsHandler = { $script:fsDirty = $true }
+$fsw.add_Changed($fsHandler); $fsw.add_Created($fsHandler); $fsw.add_Deleted($fsHandler); $fsw.add_Renamed($fsHandler)
+$fsw.EnableRaisingEvents = $true
+
 $tick = New-Object System.Windows.Forms.Timer
 $tick.Interval = 60
 $tick.add_Tick({
   $now = Get-Date
-  if (-not $script:editing -and ($now - $script:lastPoll).TotalMilliseconds -ge 120) { $script:lastPoll = $now; Update-Card }
+  if (-not $script:editing -and ($script:fsDirty -or ($now - $script:lastPoll).TotalMilliseconds -ge 120)) { $script:fsDirty = $false; $script:lastPoll = $now; Update-Card }
   if (($now - $script:lastAnimChk).TotalSeconds -ge 3) { $script:lastAnimChk = $now; try { $script:animOn = [Lp]::AnimationsOn() } catch {} }
   # keep the pet/cards above other windows (Windows silently demotes topmost on focus changes);
   # but don't fight a fullscreen game / presentation / Do-Not-Disturb
@@ -513,6 +524,7 @@ $tick.add_Tick({
 $form.add_Shown({ Render 'idle'; Update-Card; $tick.Start() })
 [System.Windows.Forms.Application]::Run($form)
 foreach ($f in $script:frames.Values) { $f.Dispose() }
+try { $fsw.EnableRaisingEvents = $false; $fsw.Dispose() } catch {}
 $card.Dispose(); $form.Dispose()
 Remove-Item $pidPath -Force -ErrorAction SilentlyContinue
 try { $script:petMutex.ReleaseMutex() } catch {}

@@ -9,7 +9,7 @@
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" prompt" } ] }
     ],
-    "PreToolUse": [
+    "PostToolUse": [
       { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" busy" } ] }
     ],
     "Stop": [

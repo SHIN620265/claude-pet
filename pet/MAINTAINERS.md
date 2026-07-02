@@ -21,9 +21,10 @@
 
 ## 工作原理
 - 钩子驱动状态(插件 `hooks/hooks.json`,所有会话/终端通用):`SessionStart`登记+拉起、`UserPromptSubmit`thinking+取首句标题、
-  `PreToolUse`busy(批准后即把 attention 复位;**不挂 PostToolUse**——与 PreToolUse 语义重复,只会让每次工具调用多一次 pwsh 冷启动)、
+  `PostToolUse`busy(工具跑完即把 attention 复位;**不挂 PreToolUse**——它在权限弹窗**之前**触发,复位不了"需确认",
+  只会让每次工具调用多一次 pwsh 冷启动,还把权限弹窗往后垫)、
   `Stop`done、`Notification`attention(过滤空闲误报)、`SessionEnd`撤卡。
-- 常驻每 ~120ms 读 `sessions\` 渲染卡片;每 60ms 跑动画;每 ~2s 查 `Get-Process claude`,无则自杀。
+- 常驻用 FileSystemWatcher 即时感知 `sessions\` 变化(~120ms 轮询兜底)渲染卡片;每 60ms 跑动画;每 ~2s 查 `Get-Process claude`,无则自杀。
 - 与终端无关:宠物是独立桌面进程,只认进程名 `claude.exe`,钩子在自己的 pwsh 里跑。
 
 ## 已落实的最佳实践
@@ -36,6 +37,7 @@
   才 Stop / 认定在跑——防崩溃/重启后 PID 被系统复用时误杀无关进程或误判"已在运行"。
 - 资产随版本刷新:插件目录副本比 `pet-data` 副本新(mtime)即覆盖镜像,发新版改文案/音效对老用户生效。
 - `events.log` 上限 256KB,超限重建,不无界增长。
+- 低延迟:钩子写文件 → FileSystemWatcher 即刻触发渲染;剩余延迟地板是钩子 pwsh 冷启动(~0.2-0.4s)。
 
 ## 踩过的坑(重要)
 1. **5.1 编码**:常驻用 `powershell.exe`(WinForms 需 STA)。5.1 把无 BOM 的 UTF-8 当 GBK 读 →
@@ -52,6 +54,9 @@
    覆盖会话卡——否则压缩/恢复时会把已有的首句标题冲成项目名。规则:仅「新 sid」或 `/clear`(重置,
    顺带删 `.titlelock`)才写新 idle 卡;resume / compact / 重登记已有会话时**保持原卡不动**。同理
    `pet-event.ps1` 的 `idle`/`done`/`busy`/`attention` 用 `TitleOr`(保留已有标题),不要直接写 `$projOr`。
+9. **PreToolUse 在权限弹窗"之前"触发**(所以钩子才能代替用户放行/拦截),别指望它把 attention 复位——
+   复位"需确认→思考中"的只能是 `PostToolUse`(工具跑完)。1.0.2 曾删错钩子(留 Pre 删 Post),
+   导致用户批准后卡片长时间滞留"需要你确认/选择",1.0.3 修正。
 
 ## 常用命令
 ```powershell
