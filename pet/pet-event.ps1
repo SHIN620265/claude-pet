@@ -26,9 +26,38 @@ $file = Join-Path $sessDir $sid
 function RU($p) { if (Test-Path $p) { try { return [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8) } catch {} } return '' }
 function ExistingTitle { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 3) { return $p[2] } } return '' }
 function ExistingDetail { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 4) { return $p[3] } } return '' }
+function ExistingModel { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 6) { return $p[5] } } return '' }
+
+# model shown on the card = the model of this session's LAST reply, parsed from the
+# transcript tail. Honest per-session semantics: never claims "current model" (hooks
+# don't expose one), so multiple sessions on different models each show their own;
+# after /model the badge catches up with the next assistant message.
+function ModelFromTranscript($tp) {
+  if (-not $tp -or -not (Test-Path $tp)) { return '' }
+  try {
+    $fs = [IO.File]::Open($tp, 'Open', 'Read', 'ReadWrite')
+    $take = [Math]::Min($fs.Length, 262144)
+    if ($take -le 0) { $fs.Dispose(); return '' }
+    [void]$fs.Seek(-$take, 'End')
+    $buf = New-Object byte[] $take; [void]$fs.Read($buf, 0, $take); $fs.Dispose()
+    $txt = [Text.Encoding]::UTF8.GetString($buf)
+    $ms = [regex]::Matches($txt, '"model"\s*:\s*"([^"]*claude-[a-z0-9.-]+)"')   # anchored to the JSON field, not free text
+    if ($ms.Count -eq 0) { return '' }
+    $id = $ms[$ms.Count - 1].Groups[1].Value
+    $m = [regex]::Match($id, 'claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?!\d)')      # (?!\d) keeps date suffixes out
+    if (-not $m.Success) { return '' }
+    $fam = $m.Groups[1].Value; $fam = $fam.Substring(0,1).ToUpper() + $fam.Substring(1)
+    $v = $m.Groups[2].Value; if ($m.Groups[3].Success) { $v = "$v.$($m.Groups[3].Value)" }
+    return "$fam $v"
+  } catch { return '' }
+}
+$tp = ''; if ($j) { $tp = [string]$j.transcript_path }
+$mdl = ModelFromTranscript $tp
+if (-not $mdl) { $mdl = ExistingModel }   # events without transcript_path keep the badge
+
 function WriteSession($key, $label, $title, $detail) {
   $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-  $rec = ($key, $label, $title, $detail, "$epoch") -join "`t"
+  $rec = ($key, $label, $title, $detail, "$epoch", $mdl) -join "`t"
   [IO.File]::WriteAllText($file, $rec, (New-Object Text.UTF8Encoding($false)))
 }
 $projOr = $proj   # may be empty; the resident localizes an empty title to "new session"

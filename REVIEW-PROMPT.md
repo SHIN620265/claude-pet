@@ -28,8 +28,8 @@
 - **单实例**:常驻启动即持命名 Mutex(`ClaudePetResident`),`pet.pid` 记录当前常驻 PID。理论上不会再出现"两个常驻叠加"(历史上踩过);若见到即回归失败(T16)。
 - **沙箱**:`cmd /c` 可能被拦;给子进程喂 stdin 用管道或 `Start-Process -RedirectStandardInput`。
 - **会话状态文件格式**(`sessions\<id>`,单行,TAB 分隔):
-  `key <TAB> label <TAB> title <TAB> detail <TAB> epochMillis`
-  - `key` ∈ `thinking|attention|done|idle`(决定颜色/图标/本地化文案);`label` 已被常驻忽略(按 key 本地化),填占位即可;`title`=卡片标题;`detail`=状态行后半句。
+  `key <TAB> label <TAB> title <TAB> detail <TAB> epochMillis <TAB> model`
+  - `key` ∈ `thinking|attention|done|idle`(决定颜色/图标/本地化文案);`label` 已被常驻忽略(按 key 本地化),填占位即可;`title`=卡片标题;`detail`=状态行后半句;`model`(可空)=该会话上一条回复的模型短名(如 `Fable 5`),显示为状态行前缀,老格式(5 字段)兼容。
 
 ---
 
@@ -129,6 +129,7 @@ public static class Q{
 | T20 | 资产随版本刷新 | `(Get-Item "$code\strings.json").LastWriteTime = Get-Date`,重启常驻 | `$data\strings.json` 被覆盖(mtime 变新);内容与 `$code` 一致 |
 | T21 | 低延迟(FSW) | 注入一个 attention 会话文件,立即截图 | 卡片近即时更新(≤0.5s,FileSystemWatcher;120ms 轮询仅兜底) |
 | T22 | 即时"需确认"(PermissionRequest) | 真实触发一个权限弹窗,掐表看卡片变琥珀 | ≤1.5s(不等 Notification 的 6s 防打扰);被 allowlist 自动放行的命令**不得**出 attention 卡;6s 后 Notification 兜底到来不得重响提示音 |
+| T23 | 模型徽标 | 造一个尾行含 `"model":"claude-fable-5"` 的假 transcript,触发 `prompt`(stdin 带 `transcript_path`);再注入 5 字段老格式卡 | 状态行显示 `Fable 5 · 状态 · detail`;老格式卡无前缀不报错;无 transcript 的事件(如 permreq)保留已有徽标;正文里提到的模型 ID **不得**被误认(必须只认 `"model":"…"` JSON 字段) |
 
 **T12 找宠物窗口并踩到底层的片段**
 ```powershell

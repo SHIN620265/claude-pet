@@ -384,7 +384,7 @@ function Update-Card {
     if (($now - $epoch) -gt 1800000) { Remove-Item $f.FullName, "$($f.FullName).dismiss", "$($f.FullName).titlelock" -Force -ErrorAction SilentlyContinue; continue }
     $dp = "$($f.FullName).dismiss"
     if (Test-Path $dp) { $de = 0L; [long]::TryParse((RU $dp), [ref]$de) | Out-Null; if ($de -ge $epoch) { continue } }
-    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$p[2]; detail=$(if($p.Count -ge 4){$p[3]}else{''}); epoch=$epoch }
+    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$p[2]; detail=$(if($p.Count -ge 4){$p[3]}else{''}); epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}) }
   }
   # minimal hybrid: float 'attention' (needs you) to the top; everything else stays newest-first
   $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true} | Select-Object -First $MAXROWS)
@@ -406,14 +406,16 @@ function Update-Card {
     return
   }
 
-  $sig = ($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)" }) -join '##'
+  $sig = ($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)" }) -join '##'
   if ($sig -ne $script:lastSig) {
     for ($i = 0; $i -lt $MAXROWS; $i++) {
       if ($i -lt $list.Count) {
         $s = $list[$i]
         $lab = L $s.key $s.label
         $rowTitle[$i].Text = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
-        $rowState[$i].Text = $(if ($s.detail) { "$lab  $([char]0x00B7)  $($s.detail)" } else { $lab })
+        # status line: [model of the session's last reply] . state . latest input
+        $parts = @(); if ($s.model) { $parts += $s.model }; $parts += $lab; if ($s.detail) { $parts += $s.detail }
+        $rowState[$i].Text = ($parts -join "  $([char]0x00B7)  ")
         $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
         $rowState[$i].ForeColor = $col
         $script:rowKeys[$i] = $s.key; $script:rowSids[$i] = $s.sid
