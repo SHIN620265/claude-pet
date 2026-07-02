@@ -65,7 +65,9 @@ switch ($Event) {
   'attention' {
     $msg = ''; if ($j) { $msg = [string]$j.message }
     $ntype = ''; if ($j) { foreach ($k in 'type','notification_type','notificationType') { if ($j.$k) { $ntype = [string]$j.$k; break } } }
-    try { Add-Content (Join-Path $dir 'events.log') -Value ('{0}  {1}  type={2}  msg={3}' -f (Get-Date -Format 'MM-dd HH:mm:ss'), $Event, $ntype, $msg) -Encoding UTF8 } catch {}
+    $log = Join-Path $dir 'events.log'
+    if ((Test-Path $log) -and ((Get-Item $log).Length -gt 262144)) { Remove-Item $log -Force -ErrorAction SilentlyContinue }   # debug log: cap at 256KB
+    try { Add-Content $log -Value ('{0}  {1}  type={2}  msg={3}' -f (Get-Date -Format 'MM-dd HH:mm:ss'), $Event, $ntype, $msg) -Encoding UTF8 } catch {}
     $cleared = ($ntype -match '(?i)elicitation_(complete|response)')   # user answered -> drop attention
     $ignore = ($msg -match '(?i)waiting for') -or ($ntype -eq 'idle_prompt') -or ($ntype -eq 'auth_success')
     if ($cleared) {

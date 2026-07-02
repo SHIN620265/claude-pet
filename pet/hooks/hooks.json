@@ -12,9 +12,6 @@
     "PreToolUse": [
       { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" busy" } ] }
     ],
-    "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" busy" } ] }
-    ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/pet-event.ps1\" done" } ] }
     ],

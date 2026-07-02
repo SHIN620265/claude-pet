@@ -9,6 +9,15 @@ $sessDir = Join-Path $dir 'sessions'
 if (-not (Test-Path $sessDir)) { New-Item -ItemType Directory -Path $sessDir | Out-Null }
 $pf = Join-Path $dir 'pet.pid'
 
+# verify the recorded PID really is the pet (PID reuse after crash/reboot would
+# otherwise make us think it is still running and never relaunch it)
+function Test-PetProcess([int]$procId) {
+  $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+  if (-not $p -or $p.ProcessName -ne 'powershell') { return $false }
+  $ci = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+  return [bool]($ci -and $ci.CommandLine -match 'pet-resident\.ps1')
+}
+
 $raw = ''
 try {
   $sr = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
@@ -44,7 +53,7 @@ if ($state -eq 'on') {
   $running = $false
   if (Test-Path $pf) {
     $id = Get-Content $pf | Select-Object -First 1
-    if ($id -and (Get-Process -Id $id -ErrorAction SilentlyContinue)) { $running = $true }
+    if ($id -match '^\d+$' -and (Test-PetProcess ([int]$id))) { $running = $true }
   }
   if (-not $running) {
     Remove-Item $pf -Force -ErrorAction SilentlyContinue

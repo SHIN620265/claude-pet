@@ -11,7 +11,7 @@
 3. 复核"历史坑"是否回归(见 §5);
 4. 全程**只测不改**;若发现 bug,报告给负责人,不要擅自改实现。
 
-应用根目录:`~/.claude/pet`
+脚本目录(下称 `$code`):插件安装目录,开发时即本仓库 `pet\`;运行时数据目录(下称 `$data`):`~/.claude/pet-data`
 
 ---
 
@@ -25,7 +25,7 @@
 - **常驻 `pet-resident.ps1` 跑在 `powershell.exe`(5.1, STA)**;钩子脚本跑在 `pwsh`(7)。WinForms 必须 STA。
 - **5.1 编码坑**:5.1 把无 BOM 的 UTF-8 当 GBK 读 → 常驻源码**不能有中文/符号字面量**。所有中文来自 `strings.json` / `sessions` 文件(UTF-8 读)或 `[char]0xXXXX`。看到卡片/菜单乱码 = 这条破了。
 - **DPI**:常驻是 Per-Monitor DPI 感知。**你的截图进程也必须设 DPI 感知**,否则坐标对不上(见 §3 片段)。
-- **单实例**:`pet.pid` 记录当前常驻 PID。测试时务必确认只有 1 个常驻进程,避免"两个常驻叠加"误导(历史上踩过)。
+- **单实例**:常驻启动即持命名 Mutex(`ClaudePetResident`),`pet.pid` 记录当前常驻 PID。理论上不会再出现"两个常驻叠加"(历史上踩过);若见到即回归失败(T16)。
 - **沙箱**:`cmd /c` 可能被拦;给子进程喂 stdin 用管道或 `Start-Process -RedirectStandardInput`。
 - **会话状态文件格式**(`sessions\<id>`,单行,TAB 分隔):
   `key <TAB> label <TAB> title <TAB> detail <TAB> epochMillis`
@@ -35,30 +35,34 @@
 
 ## 3. 可复用片段(直接抄)
 
+**变量约定(以下片段通用)**
+```powershell
+$data="$HOME\.claude\pet-data"        # 运行时数据
+$code="<插件安装目录或仓库 pet 目录>"   # 脚本所在
+```
+
 **重启常驻**
 ```powershell
-$d="$HOME\.claude\pet"
-Get-Content "$d\pet.pid" | % { Stop-Process -Id $_ -Force -EA SilentlyContinue }
+Get-Content "$data\pet.pid" | % { Stop-Process -Id $_ -Force -EA SilentlyContinue }
 Start-Sleep -Milliseconds 600
-$p=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$d\pet-resident.ps1"
-$p.Id | Set-Content "$d\pet.pid"; Start-Sleep -Seconds 3
+$p=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$code\pet-resident.ps1"
+$p.Id | Set-Content "$data\pet.pid"; Start-Sleep -Seconds 3
 "alive=$(-not $p.HasExited)"
 ```
 
 **注入一个会话状态(模拟某会话进入某状态)**
 ```powershell
-$sd="$HOME\.claude\pet\sessions"; $e=[long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+$sd="$HOME\.claude\pet-data\sessions"; $e=[long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
 [IO.File]::WriteAllText("$sd\t_attn", ("attention`tX`t测试标题`t最近一句输入`t$e"), (New-Object Text.UTF8Encoding($false)))
 # 用完删:Remove-Item "$sd\t_*" -Force
 ```
 
 **触发一个真实钩子(带 stdin JSON,UTF-8)**
 ```powershell
-$d="$HOME\.claude\pet"
-'{"session_id":"t_hook","cwd":"D:\\path\\myproject","prompt":"做一个功能"}' | pwsh -NoProfile -ExecutionPolicy Bypass -File "$d\pet-event.ps1" prompt
-# 其它事件:done / busy / attention(需 message/type)/ idle / end
+'{"session_id":"t_hook","cwd":"D:\\path\\myproject","prompt":"做一个功能"}' | pwsh -NoProfile -ExecutionPolicy Bypass -File "$code\pet-event.ps1" prompt
+# 其它事件:done / busy(PreToolUse 触发,已无 PostToolUse)/ attention(需 message/type)/ idle / end
 # SessionStart:把 source 设 compact/clear/startup 测标题保留/重置
-'{"session_id":"t_hook","cwd":"D:\\path\\myproject","source":"compact"}' | pwsh -NoProfile -File "$d\pet-session-start.ps1"
+'{"session_id":"t_hook","cwd":"D:\\path\\myproject","source":"compact"}' | pwsh -NoProfile -File "$code\pet-session-start.ps1"
 ```
 
 **DPI 感知截图(卡片区域)**
@@ -69,7 +73,7 @@ public static class D{ [DllImport("user32.dll")] public static extern bool SetPr
 "@
 [D]::SetProcessDpiAwarenessContext([IntPtr](-4))|Out-Null
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-$d="$HOME\.claude\pet"; $pos=(Get-Content "$d\pet-pos.txt") -split ','; $px=[int]$pos[0]; $py=[int]$pos[1]
+$pos=(Get-Content "$data\pet-pos.txt") -split ','; $px=[int]$pos[0]; $py=[int]$pos[1]
 $x=$px-95; $y=$py+150   # 卡片大致在宠物左下
 $bmp=New-Object System.Drawing.Bitmap 480,200; $g=[System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($x,$y,0,0,(New-Object System.Drawing.Size(480,200))); $bmp.Save("$env:TEMP\pet-shot.png"); $g.Dispose(); $bmp.Dispose()
@@ -81,7 +85,7 @@ $g.CopyFromScreen($x,$y,0,0,(New-Object System.Drawing.Size(480,200))); $bmp.Sav
 function MW($p){ $b=[IO.File]::ReadAllBytes($p); $n=([double]($b.Length-44))/2; $s=0.0; $pk=0
  for($i=44;$i -lt $b.Length-1;$i+=2){ $v=[BitConverter]::ToInt16($b,$i); $a=[math]::Abs($v); if($a -gt $pk){$pk=$a}; $s+=[double]$v*$v }
  "{0}: peak={1:N2} RMS={2:N2} dur={3:N0}ms" -f (Split-Path $p -Leaf),(20*[math]::Log10($pk/32768)),(20*[math]::Log10([math]::Sqrt($s/$n)/32768)),($n/44100*1000) }
-MW "$HOME\.claude\pet\done.wav"; MW "$HOME\.claude\pet\attn.wav"
+MW "$HOME\.claude\pet-data\done.wav"; MW "$HOME\.claude\pet-data\attn.wav"
 ```
 
 **读系统状态(用于声音抑制 / 减少动画测试)**
@@ -116,11 +120,13 @@ public static class Q{
 | T11 | 减少动画 | 关 Windows 动画(设置→辅助功能→视觉效果→动画效果),`[Q]::AN()`=0 | 宠物停浮动/眨眼;转圈变静态「…」;开回动画恢复(≤3s) |
 | T12 | 置顶不被压 | 见 §3 末"找宠物窗口并踩到底层"片段 | 被降级后 ≤2s 自动重新置顶;但 NS≠5 时不强抢 |
 | T13 | 多语种 | `lang.txt` 设 zh/en/ja/auto 重启;右键「语言」即时切 | 状态/菜单本地化正确;卡片标题(你的输入)**不翻译**;auto 跟随系统 |
-| T14 | 钩子映射 | 逐个触发 prompt/busy/done/attention/idle/end | 状态正确流转;`waiting for`/idle_prompt/auth_success/elicitation_* 被过滤不弹 |
+| T14 | 钩子映射 | 逐个触发 prompt/busy/done/attention/idle/end(busy=PreToolUse,hooks.json 不得含 PostToolUse) | 状态正确流转;`waiting for`/idle_prompt/auth_success/elicitation_* 被过滤不弹 |
 | T15 | 编码 | 看菜单「关闭宠物」「·」分隔、中文卡片 | 无乱码(无「路」等) |
-| T16 | 单实例 | 多次 SessionStart / toggle | 始终只有 1 个 `pet-resident.ps1` 进程 |
+| T16 | 单实例(Mutex) | 直接**并发**启动 2 个 `pet-resident.ps1`(或先删常驻再并发 2 次 SessionStart) | ~3s 后只剩 1 个 `pet-resident.ps1` 进程,第二个静默自退 |
 | T17 | 多界面并存 | 在 WT/VS Code 终端/PowerShell 同时开 Claude | 各自一张卡;任一 claude.exe 在即不退 |
 | T18 | (发布前)可移植性 | 全仓搜 `C:\Users\` 一类写死绝对路径 | 报告所有写死的绝对路径(应为 `$PSScriptRoot`/`$env:USERPROFILE`) |
+| T19 | PID 复用安全 | 起一个无关 `powershell -Command Start-Sleep 60`,把它的 PID 写入 `$data\pet.pid`,跑 `pet-toggle.ps1` | 无关进程**不被杀**;toggle 视为"未运行",输出 `on` 并拉起新宠物 |
+| T20 | 资产随版本刷新 | `(Get-Item "$code\strings.json").LastWriteTime = Get-Date`,重启常驻 | `$data\strings.json` 被覆盖(mtime 变新);内容与 `$code` 一致 |
 
 **T12 找宠物窗口并踩到底层的片段**
 ```powershell
@@ -136,8 +142,8 @@ public static class WZ{
  public static bool IsTop(IntPtr h){return (GetWindowLong(h,-20)&0x8)!=0;}
  public static void Bury(IntPtr h){SetWindowPos(h,(IntPtr)(-2),0,0,0,0,0x13);SetWindowPos(h,(IntPtr)1,0,0,0,0,0x13);} }
 "@
-$pid=[uint32](Get-Content "$HOME\.claude\pet\pet.pid" | Select -First 1)
-$h=[WZ]::FindPet($pid); "before=$([WZ]::IsTop($h))"; [WZ]::Bury($h); "buried=$([WZ]::IsTop($h))"
+$petPid=[uint32](Get-Content "$HOME\.claude\pet-data\pet.pid" | Select -First 1)   # 别用 $pid,是只读自动变量
+$h=[WZ]::FindPet($petPid); "before=$([WZ]::IsTop($h))"; [WZ]::Bury($h); "buried=$([WZ]::IsTop($h))"
 Start-Sleep -Milliseconds 2600; "after2.6s=$([WZ]::IsTop($h))  # 期望 True"
 ```
 
@@ -151,6 +157,7 @@ Start-Sleep -Milliseconds 2600; "after2.6s=$([WZ]::IsTop($h))  # 期望 True"
 5. **置顶降级**:必须有周期性重声明(T12)。
 6. **重启不重复叮**:常驻重启首轮应静音(`firstPoll`),不要把已有 done/attention 重播(T8)。
 7. **空闲误报**:Notification 的 idle/auth/elicitation 必须过滤(T14)。
+8. **PID 复用误杀 / 双实例**:toggle、session-start 必须先核验进程身份再 Stop/认定在跑(T19);常驻必须持命名 Mutex(T16)。
 
 ---
 
@@ -161,7 +168,7 @@ Start-Sleep -Milliseconds 2600; "after2.6s=$([WZ]::IsTop($h))  # 期望 True"
 ---
 
 ## 7. 收尾(测完务必恢复)
-- 删除所有测试会话文件:`Remove-Item "$HOME\.claude\pet\sessions\t_*" -Force`
+- 删除所有测试会话文件:`Remove-Item "$HOME\.claude\pet-data\sessions\t_*" -Force`
 - 恢复 `lang.txt`=`auto`、`sound.txt`=`on`(或删除让其回默认)
 - 确认只有 1 个常驻进程且宠物处于"开"
 - 删除临时调试文件(若有 `i18ndbg*.txt`、`$env:TEMP\pet-*.png`)

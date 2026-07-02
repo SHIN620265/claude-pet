@@ -7,11 +7,21 @@ if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Ou
 $pf    = Join-Path $dir 'pet.pid'
 $state = Join-Path $dir 'pet-state.txt'
 
+# verify the recorded PID really is the pet before trusting (or killing) it:
+# after a crash/reboot the PID can be reused by an unrelated process, and a blind
+# Stop-Process would kill that innocent process
+function Test-PetProcess([int]$procId) {
+  $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+  if (-not $p -or $p.ProcessName -ne 'powershell') { return $false }
+  $ci = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+  return [bool]($ci -and $ci.CommandLine -match 'pet-resident\.ps1')
+}
+
 $running = $false
 $id = $null
 if (Test-Path $pf) {
   $id = Get-Content $pf | Select-Object -First 1
-  if ($id -and (Get-Process -Id $id -ErrorAction SilentlyContinue)) { $running = $true }
+  if ($id -match '^\d+$' -and (Test-PetProcess ([int]$id))) { $running = $true }
 }
 
 if ($running) {

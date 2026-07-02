@@ -2,7 +2,7 @@
 
 面向改代码的人。用户使用手册见 `README.md`。
 
-## 文件清单(均在 `~/.claude/pet`)
+## 文件清单(脚本在插件安装目录,开发时即仓库 `pet\`;运行时数据在 `~/.claude/pet-data`)
 | 文件 | 跑在 | 作用 |
 | --- | --- | --- |
 | `pet-resident.ps1` | **powershell.exe(5.1, STA)** | 常驻 GUI:分层透明宠物 + 状态卡 + 右键菜单 + 所有渲染/交互 |
@@ -13,14 +13,17 @@
 | `claude-draw.ps1` | 任意 | 生成 `claude-idle/blink/happy.png` |
 | `strings.json` | — | 多语种资源(加语言只需加一个块,含 `_name`) |
 
-**运行时文件**:`lang.txt`(`auto/zh/en/ja`)、`sound.txt`(`on/off`)、`pet-state.txt`(开关记忆)、
-`pet-pos.txt`(位置)、`pet.pid`、`sessions\<id>`(+`.dismiss` 关闭标记、`.titlelock` 改名锁定)。
-命令:`~/.claude/commands/my-pet.md`;钩子:`~/.claude/settings.json` 的 `hooks`。
+**运行时文件**(均在 `~/.claude/pet-data`):`lang.txt`(`auto/zh/en/ja`)、`sound.txt`(`on/off`)、
+`pet-state.txt`(开关记忆)、`pet-pos.txt`(位置)、`pet.pid`、`events.log`(调试,超 256KB 自动重建)、
+`sessions\<id>`(+`.dismiss` 关闭标记、`.titlelock` 改名锁定)。随附资产(`strings.json`/wav/png)由常驻
+从插件目录镜像到这里;插件里的副本更新(mtime 变新)即自动覆盖刷新。
+命令:插件自带 `commands/my-pet.md`(`/my-pet`);钩子:插件自带 `hooks/hooks.json`(路径经 `${CLAUDE_PLUGIN_ROOT}` 解析)。
 
 ## 工作原理
-- 钩子驱动状态(用户级 settings,所有会话/终端通用):`SessionStart`登记+拉起、`UserPromptSubmit`thinking+取首句标题、
-  `PostToolUse`busy、`Stop`done、`Notification`attention(过滤空闲误报)、`SessionEnd`撤卡。
-- 常驻每 ~300ms 读 `sessions\` 渲染卡片;每 60ms 跑动画;每 ~2s 查 `Get-Process claude`,无则自杀。
+- 钩子驱动状态(插件 `hooks/hooks.json`,所有会话/终端通用):`SessionStart`登记+拉起、`UserPromptSubmit`thinking+取首句标题、
+  `PreToolUse`busy(批准后即把 attention 复位;**不挂 PostToolUse**——与 PreToolUse 语义重复,只会让每次工具调用多一次 pwsh 冷启动)、
+  `Stop`done、`Notification`attention(过滤空闲误报)、`SessionEnd`撤卡。
+- 常驻每 ~120ms 读 `sessions\` 渲染卡片;每 60ms 跑动画;每 ~2s 查 `Get-Process claude`,无则自杀。
 - 与终端无关:宠物是独立桌面进程,只认进程名 `claude.exe`,钩子在自己的 pwsh 里跑。
 
 ## 已落实的最佳实践
@@ -28,6 +31,11 @@
 - 勿扰/全屏抑制:`SHQueryUserNotificationState`(全屏/演示/专注助手时静音,卡片仍更新,fail-open)。
 - 尊重减少动画:`SPI_GETCLIENTAREAANIMATION`(关动画→停浮动/眨眼、转圈转静态,每 3s 重查)。
 - Per-Monitor DPI 感知;图标+颜色双编码;声音可一键静音(WCAG 1.4.2);需确认置顶;多语种即时切换。
+- 单实例:常驻启动即持命名 Mutex(`ClaudePetResident`),SessionStart 并发竞态下第二个实例静默自退。
+- PID 身份核验:toggle / session-start 先验证 `pet.pid` 指向的进程确为 `powershell` 且命令行含 `pet-resident.ps1`,
+  才 Stop / 认定在跑——防崩溃/重启后 PID 被系统复用时误杀无关进程或误判"已在运行"。
+- 资产随版本刷新:插件目录副本比 `pet-data` 副本新(mtime)即覆盖镜像,发新版改文案/音效对老用户生效。
+- `events.log` 上限 256KB,超限重建,不无界增长。
 
 ## 踩过的坑(重要)
 1. **5.1 编码**:常驻用 `powershell.exe`(WinForms 需 STA)。5.1 把无 BOM 的 UTF-8 当 GBK 读 →
@@ -36,7 +44,7 @@
 2. **变量名大小写不敏感**:`$t`(行标签)曾覆盖 `$script:T`(语言对象)→ 别用单字母脚本级变量;i18n 用 `$script:STR`。
 3. **pwsh vs powershell**:写文件/钩子用 pwsh(UTF-8);常驻 GUI 用 powershell.exe(STA)。
    `!` 捕获会弄乱中文 stdout → `pet-toggle.ps1` 只输出 ASCII `on/off`,中文由模型转述。
-4. **权限**:`my-pet.md` 的 `allowed-tools` 必须匹配实际命令(`Bash(pwsh:*)`);settings 里精确放行 toggle(最小权限)。
+4. **权限**:`my-pet.md` 的 `allowed-tools` 必须匹配实际命令(`Bash(pwsh:*)`),保持最小权限。
 5. **调试截图**:常驻是 Per-Monitor DPI 感知;截图进程也要设 DPI 感知,否则坐标对不上。
 6. **沙箱**:`cmd /c` 可能被拦;喂 stdin 用 `Start-Process -RedirectStandardInput`。
 7. 改脚本多数要**重启常驻**;钩子/命令改动要重启 Claude Code(或开一次 `/hooks`)才重载。
@@ -47,12 +55,13 @@
 
 ## 常用命令
 ```powershell
-$d="$HOME\.claude\pet"
+$data="$HOME\.claude\pet-data"        # 运行时数据
+$code="<插件安装目录或仓库 pet 目录>"   # 脚本所在
 # 重启常驻
-Get-Content "$d\pet.pid" | % { Stop-Process -Id $_ -Force -EA SilentlyContinue }
-Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$d\pet-resident.ps1"
-# 重新生成提示音 / 形象
-& "$d\pet-sounds.ps1"; & "$d\claude-draw.ps1"
+Get-Content "$data\pet.pid" | % { Stop-Process -Id $_ -Force -EA SilentlyContinue }
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$code\pet-resident.ps1"
+# 重新生成提示音 / 形象(写入 $code,常驻启动时按 mtime 镜像到 $data)
+& "$code\pet-sounds.ps1"; & "$code\claude-draw.ps1"
 # 手动开关
-pwsh -NoProfile -ExecutionPolicy Bypass -File "$d\pet-toggle.ps1"
+pwsh -NoProfile -ExecutionPolicy Bypass -File "$code\pet-toggle.ps1"
 ```

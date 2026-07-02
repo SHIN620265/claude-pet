@@ -77,13 +77,22 @@ public static class Lp {
 Add-Type -TypeDefinition $cs -ReferencedAssemblies System.Windows.Forms, System.Drawing
 [Lp]::EnableDpi()
 
+# single-instance guard: concurrent SessionStart hooks can race past the pet.pid check
+# and spawn two residents; a named mutex makes the loser exit before it touches pet.pid
+$script:petMutex = New-Object System.Threading.Mutex($false, 'ClaudePetResident')
+$acquired = $false
+try { $acquired = $script:petMutex.WaitOne(0) }
+catch [System.Threading.AbandonedMutexException] { $acquired = $true }   # previous owner was force-killed; take over
+if (-not $acquired) { return }
+
 $code = $PSScriptRoot
 $root = Join-Path $env:USERPROFILE '.claude\pet-data'
 if (-not (Test-Path $root)) { New-Item -ItemType Directory -Force -Path $root | Out-Null }
-# bundled assets live in the (read-only) plugin dir; copy them into the writable data dir once
+# bundled assets live in the (read-only) plugin dir; mirror them into the writable data
+# dir, refreshing when the shipped copy is newer (so plugin updates actually take effect)
 foreach ($a in 'strings.json', 'done.wav', 'attn.wav', 'claude-idle.png', 'claude-blink.png', 'claude-happy.png') {
   $sA = Join-Path $code $a; $dA = Join-Path $root $a
-  if ((Test-Path $sA) -and -not (Test-Path $dA)) { Copy-Item $sA $dA -Force }
+  if ((Test-Path $sA) -and ((-not (Test-Path $dA)) -or ((Get-Item $sA).LastWriteTimeUtc -gt (Get-Item $dA).LastWriteTimeUtc))) { Copy-Item $sA $dA -Force }
 }
 $pidPath = Join-Path $root 'pet.pid'
 $posPath = Join-Path $root 'pet-pos.txt'
@@ -506,3 +515,5 @@ $form.add_Shown({ Render 'idle'; Update-Card; $tick.Start() })
 foreach ($f in $script:frames.Values) { $f.Dispose() }
 $card.Dispose(); $form.Dispose()
 Remove-Item $pidPath -Force -ErrorAction SilentlyContinue
+try { $script:petMutex.ReleaseMutex() } catch {}
+try { $script:petMutex.Dispose() } catch {}
