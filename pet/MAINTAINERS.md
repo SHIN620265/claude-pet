@@ -42,6 +42,9 @@
   FileSystemWatcher 即刻渲染;纯观察且不怕乱序的钩子标 `async` 免拖慢主流程;钩子一律用 **exec 直启形式**
   (`command`+`args` 数组)——字符串 command 会先起一层 wrapper shell(Git Bash,实测 60-730ms)再启 pwsh,
   exec 形式把这层砍掉;剩余地板是 pwsh 冷启动(实测 ~0.6-1.2s,方差来自杀软)。
+- **平台信息缺口(设计内滞留,勿当 bug 修)**:批准权限后到工具跑完之间,Claude Code 不产生任何事件
+  (没有 "PermissionGranted"),长命令期间 attention 卡滞留是无解的——不许让宠物"猜"已批准
+  (猜错即说谎)。README 已知限制三语已注明,用户侧口径=命令结束自动恢复。
 - 模型徽标**只在回合结束态(done/idle)渲染**,回合中(thinking/attention)一律隐藏——正在跑的模型平台不暴露
   (钩子 payload 无 model 字段,settings 只有全局默认),显示"上一条的模型"会被读成"正在思考的模型"而误导。
 - done 卡的 detail = **回复首句摘要**,与徽标取自 transcript(`transcript_path`)尾部**同一条** assistant 消息
