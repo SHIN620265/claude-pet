@@ -71,6 +71,10 @@
     6 秒内已响应则不发,不可配置)才发 Notification。"需确认"的即时性靠 `PermissionRequest` 钩子(弹窗即触发,
     1.0.4 引入);Notification 仅作兜底,两者写同一 key,幂等不重响。`async` 只用于纯观察钩子——
     `done`/`busy` 这类有先后语义的保持同步,防止乱序覆盖(如 Stop 的 done 被迟到的 busy 冲掉)。
+11. **周期性置顶重申必须避开一切瞬态 UI**:每 ~2s 的 `SetWindowPos(TOPMOST)` 会把卡片砸到置顶层最上方,
+    盖住同层的弹出物。改名编辑框早有守卫(`$script:editing`),右键菜单漏了——1.0.8 补 `-not $menu.Visible`,
+    并把菜单改为 owner 形式弹出(`$menu.Show($form,…)`,owned popup 恒在 owner 之上)。以后新增任何
+    菜单/tooltip/浮层,都要同步扩这个守卫。
 
 ## 常用命令
 ```powershell

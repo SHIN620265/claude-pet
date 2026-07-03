@@ -447,7 +447,7 @@ $form.add_MouseMove({ param($s,$e)
 })
 $form.add_MouseUp({ param($s,$e)
   if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and $script:dragging) { $script:dragging = $false; $form.Capture = $false; "$($script:x),$($script:y)" | Set-Content $posPath -ErrorAction SilentlyContinue }
-  elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { $menu.Show([System.Windows.Forms.Cursor]::Position) }
+  elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { $menu.Show($form, $form.PointToClient([System.Windows.Forms.Cursor]::Position)) }   # owner-show keeps the menu above owned/topmost siblings
 })
 $form.add_DoubleClick({ if (Test-Path $collapsePath) { Remove-Item $collapsePath -Force } else { New-Item -ItemType File $collapsePath -Force | Out-Null } })
 
@@ -468,8 +468,10 @@ $tick.add_Tick({
   if (-not $script:editing -and ($script:fsDirty -or ($now - $script:lastPoll).TotalMilliseconds -ge 120)) { $script:fsDirty = $false; $script:lastPoll = $now; Update-Card }
   if (($now - $script:lastAnimChk).TotalSeconds -ge 3) { $script:lastAnimChk = $now; try { $script:animOn = [Lp]::AnimationsOn() } catch {} }
   # keep the pet/cards above other windows (Windows silently demotes topmost on focus changes);
-  # but don't fight a fullscreen game / presentation / Do-Not-Disturb
-  if (-not $script:editing -and ($now - $script:lastTop).TotalSeconds -ge 2) {
+  # but don't fight a fullscreen game / presentation / Do-Not-Disturb, and NEVER re-assert
+  # while transient UI (rename box, context menu) is open -- slamming the card to the top of
+  # the topmost band would cover the menu (same class of bug as the editing guard)
+  if (-not $script:editing -and -not $menu.Visible -and ($now - $script:lastTop).TotalSeconds -ge 2) {
     $script:lastTop = $now
     if ([Lp]::CanNotify()) { [Lp]::Top($form.Handle); if ($card.Visible) { [Lp]::Top($card.Handle) } }
   }
