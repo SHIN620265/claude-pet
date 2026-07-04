@@ -40,6 +40,8 @@
   才 Stop / 认定在跑——防崩溃/重启后 PID 被系统复用时误杀无关进程或误判"已在运行"。
 - 资产随版本刷新:插件目录副本比 `pet-data` 副本新(mtime)即覆盖镜像,发新版改文案/音效对老用户生效。
 - `events.log` 上限 256KB,超限重建,不无界增长。
+- 溢出徽章(1.1.0):可显示会话(已剔除 × 关闭/闲置隐藏)超过 3 个时,第 3 行右下渲染静态灰字 `+N`
+  (纯 ASCII,零 i18n 零交互);徽章可见时该行状态文本宽度收窄避让,溢出数进渲染签名 `sig`。
 - 低延迟:"需确认"走 `PermissionRequest`(弹窗即触发)而非等 Notification 的 6s 防打扰;钩子写文件 →
   FileSystemWatcher 即刻渲染;纯观察且不怕乱序的钩子标 `async` 免拖慢主流程;钩子一律用 **exec 直启形式**
   (`command`+`args` 数组)——字符串 command 会先起一层 wrapper shell(Git Bash,实测 60-730ms)再启 pwsh,

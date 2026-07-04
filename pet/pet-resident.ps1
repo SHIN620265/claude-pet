@@ -317,6 +317,20 @@ for ($i = 0; $i -lt $MAXROWS; $i++) {
   $card.Controls.Add($ec); $ec.BringToFront(); $rowEdit[$i] = $ec
 }
 
+# overflow badge: when more sessions are eligible than rows, a static gray "+N" sits at
+# the bottom-right of the last row (left of its spinner). Zero interaction, ASCII only.
+$stateNormW = $cardW - 2*$m - [int](22*$scale)
+$stateShrunkW = $stateNormW - [int](30*$scale)
+$ovBadge = New-Object System.Windows.Forms.Label
+$ovBadge.AutoSize = $false; $ovBadge.TextAlign = 'MiddleRight'
+$ovBadge.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
+$ovBadge.ForeColor = [System.Drawing.Color]::FromArgb(150,150,155)
+$ovBadge.BackColor = [System.Drawing.Color]::Transparent
+$ovBadge.Location = New-Object System.Drawing.Point(($cardW - $m - [int](46*$scale)), ((($MAXROWS - 1) * $rowH) + [int](27*$scale)))
+$ovBadge.Size = New-Object System.Drawing.Size([int](28*$scale), [int](20*$scale))
+$ovBadge.Visible = $false
+$card.Controls.Add($ovBadge)
+
 # inline edit-in-place textbox (replaces the legacy InputBox); on-brand, edit-in-place
 $editBox = New-Object System.Windows.Forms.TextBox
 $editBox.BorderStyle = 'FixedSingle'
@@ -392,7 +406,10 @@ function Update-Card {
     $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$p[2]; detail=$(if($p.Count -ge 4){$p[3]}else{''}); epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}) }
   }
   # minimal hybrid: float 'attention' (needs you) to the top; everything else stays newest-first
-  $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true} | Select-Object -First $MAXROWS)
+  $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true})
+  # overflow = eligible-but-not-shown sessions (dismissed/hidden already filtered out above)
+  $overflow = $list.Count - $MAXROWS; if ($overflow -lt 0) { $overflow = 0 }
+  $list = @($list | Select-Object -First $MAXROWS)
 
   foreach ($s in $list) {
     if ($script:lastKeys[$s.sid] -ne $s.key) {
@@ -411,7 +428,7 @@ function Update-Card {
     return
   }
 
-  $sig = ($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)" }) -join '##'
+  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)" }) -join '##') + "|ov=$overflow"
   if ($sig -ne $script:lastSig) {
     for ($i = 0; $i -lt $MAXROWS; $i++) {
       if ($i -lt $list.Count) {
@@ -431,6 +448,15 @@ function Update-Card {
         $rowTitle[$i].Visible = $false; $rowState[$i].Visible = $false; $rowSpin[$i].Visible = $false; $rowClose[$i].Visible = $false; $rowEdit[$i].Visible = $false
         $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''
       }
+    }
+    if ($overflow -gt 0 -and $list.Count -eq $MAXROWS) {
+      $ovBadge.Text = '+' + $overflow
+      $rowState[$MAXROWS - 1].Width = $stateShrunkW   # make room so the badge never covers text
+      if (-not $ovBadge.Visible) { $ovBadge.Visible = $true }
+      $ovBadge.BringToFront()
+    } else {
+      if ($ovBadge.Visible) { $ovBadge.Visible = $false }
+      $rowState[$MAXROWS - 1].Width = $stateNormW
     }
     $h = $list.Count * $rowH
     if ($card.Height -ne $h) { $card.Height = $h; Set-CardRegion $h }
