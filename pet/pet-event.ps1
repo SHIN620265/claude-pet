@@ -171,6 +171,16 @@ switch ($Event) {
     WriteSession 'idle' '空闲' (TitleOr) (ExistingDetail)
   }
   'end' {
-    Remove-Item $file, "$file.dismiss", "$file.titlelock" -Force -ErrorAction SilentlyContinue
+    # clean exit: hide the card NOW (aged epoch rides the resident's display TTL) but keep
+    # the memory -- first-prompt title and rename must survive a later `claude --resume`;
+    # the resident's 7-day storage TTL does the eventual purge of truly dead sessions
+    $c = RU $file
+    if ($c) {
+      $p = $c -split "`t"; while ($p.Count -lt 6) { $p += '' }
+      $p[0] = 'idle'
+      $p[4] = "$([long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) - 1860000)"
+      [IO.File]::WriteAllText($file, ($p -join "`t"), (New-Object Text.UTF8Encoding($false)))
+    }
+    Remove-Item "$file.dismiss" -Force -ErrorAction SilentlyContinue
   }
 }

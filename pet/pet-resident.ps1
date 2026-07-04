@@ -381,7 +381,12 @@ function Update-Card {
     $c = RU $f.FullName; if (-not $c) { continue }
     $p = $c -split "`t"; if ($p.Count -lt 2) { continue }
     $epoch = 0L; if ($p.Count -ge 5) { [long]::TryParse($p[4], [ref]$epoch) | Out-Null }
-    if (($now - $epoch) -gt 1800000) { Remove-Item $f.FullName, "$($f.FullName).dismiss", "$($f.FullName).titlelock" -Force -ErrorAction SilentlyContinue; continue }
+    # display TTL vs storage TTL: after 30min idle the card is only HIDDEN -- the file
+    # (first-prompt title, rename lock, model badge) must survive so a revived session
+    # keeps its identity; physical deletion only after 7 days of silence
+    $idleMs = $now - $epoch
+    if ($idleMs -gt 604800000) { Remove-Item $f.FullName, "$($f.FullName).dismiss", "$($f.FullName).titlelock" -Force -ErrorAction SilentlyContinue; continue }
+    if ($idleMs -gt 1800000) { continue }
     $dp = "$($f.FullName).dismiss"
     if (Test-Path $dp) { $de = 0L; [long]::TryParse((RU $dp), [ref]$de) | Out-Null; if ($de -ge $epoch) { continue } }
     $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$p[2]; detail=$(if($p.Count -ge 4){$p[3]}else{''}); epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}) }

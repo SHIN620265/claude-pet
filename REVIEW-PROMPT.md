@@ -132,6 +132,7 @@ public static class Q{
 | T23 | 模型徽标(仅回合结束态) | 注入带 model 字段的 done / thinking / attention 卡各一张;再注入 5 字段老格式卡 | done 卡显示 `Fable 5 · 已完成 · …`;thinking/attention 卡**不显示**徽标(即使 model 字段有值);老格式卡不报错;无 transcript 的事件(如 permreq)保留已有徽标字段 |
 | T24 | 完成卡=回复摘要(同源) | 造假 transcript:主线 assistant(text+model)在前、`isSidechain:true` 条目在后、结尾再放纯 tool_use 条目,触发 `done` | detail=主线回复首句(剥 markdown、截 60);model 与该条**同源**;sidechain 与 tool_use 条目被跳过;把 text 块全删再触发 `done` → 回退保留原 detail/model;正文提到的模型 ID 不得干扰 |
 | T25 | 菜单不被卡片遮挡 | 有卡片显示时右键宠物打开菜单,保持打开 ≥5s(跨越 ≥2 个置顶重申周期) | 菜单全程完整可见、不被卡片压住;菜单关闭后 ≤2s 置顶重申恢复(T12 不回归) |
+| T26 | 标题跨隐藏/退出存活 | ①改名后把 epoch 拨老 31 分钟;②触发 `end` 再触发新 `prompt`;③把 epoch 拨老 8 天 | ①卡片隐藏但文件与 `.titlelock` 仍在;②`end` 后文件保留(key=idle,epoch 已拨老),新 prompt 复活后标题=改名(未改名则=最初首句,**不得**变成最新输入);③下个轮询周期文件被物理清除 |
 
 **T12 找宠物窗口并踩到底层的片段**
 ```powershell
