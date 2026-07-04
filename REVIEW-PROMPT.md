@@ -30,6 +30,7 @@
 - **会话状态文件格式**(`sessions\<id>`,单行,TAB 分隔):
   `key <TAB> label <TAB> title <TAB> detail <TAB> epochMillis <TAB> model`
   - `key` ∈ `thinking|attention|done|idle`(决定颜色/图标/本地化文案);`label` 已被常驻忽略(按 key 本地化),填占位即可;`title`=卡片标题;`detail`=状态行后半句(思考/需确认时=你最近一句输入,**done 时=回复首句摘要**);`model`(可空)=该会话上一条回复的模型短名(如 `Fable 5`),**仅在 done/idle 态**渲染为状态行前缀,老格式(5 字段)兼容。
+  - 侧车 `sessions\<id>.pending`(认命令布防,单行 TAB 分隔):`claudePid <TAB> armEpochMillis <TAB> 归一化命令片段`。permreq 布防;其余事件/翻卡/`/clear`/7 天清理拆防。
 
 ---
 
@@ -60,7 +61,7 @@ $sd="$HOME\.claude\pet-data\sessions"; $e=[long]([DateTimeOffset]::UtcNow.ToUnix
 **触发一个真实钩子(带 stdin JSON,UTF-8)**
 ```powershell
 '{"session_id":"t_hook","cwd":"D:\\path\\myproject","prompt":"做一个功能"}' | pwsh -NoProfile -ExecutionPolicy Bypass -File "$code\pet-event.ps1" prompt
-# 其它事件:done / busy(PostToolUse/PermissionDenied)/ permreq(PermissionRequest,即时 attention)/ attention(Notification 兜底,需 message/type)/ idle / end
+# 其它事件:done / busy(PostToolUse/PostToolUseFailure/PermissionDenied)/ permreq(PermissionRequest,即时 attention+命令类布防 .pending)/ answered(ElicitationResult,复位 attention)/ attention(Notification 兜底,需 message/type)/ idle / end
 # SessionStart:把 source 设 compact/clear/startup 测标题保留/重置
 '{"session_id":"t_hook","cwd":"D:\\path\\myproject","source":"compact"}' | pwsh -NoProfile -File "$code\pet-session-start.ps1"
 ```
@@ -120,7 +121,7 @@ public static class Q{
 | T11 | 减少动画 | 关 Windows 动画(设置→辅助功能→视觉效果→动画效果),`[Q]::AN()`=0 | 宠物停浮动/眨眼;转圈变静态「…」;开回动画恢复(≤3s) |
 | T12 | 置顶不被压 | 见 §3 末"找宠物窗口并踩到底层"片段 | 被降级后 ≤2s 自动重新置顶;但 NS≠5 时不强抢 |
 | T13 | 多语种 | `lang.txt` 设 zh/en/ja/auto 重启;右键「语言」即时切 | 状态/菜单本地化正确;卡片标题(你的输入)**不翻译**;auto 跟随系统 |
-| T14 | 钩子映射 | 逐个触发 prompt/busy/done/attention/idle/end(busy=PostToolUse,hooks.json 不得含 PreToolUse) | 状态正确流转;`waiting for`/idle_prompt/auth_success/elicitation_* 被过滤不弹 |
+| T14 | 钩子映射 | 逐个触发 prompt/busy/done/attention/idle/end/answered(busy=PostToolUse+PostToolUseFailure,answered=ElicitationResult;hooks.json 不得含 PreToolUse) | 状态正确流转;answered 仅在当前为 attention 时复位为 thinking;`waiting for`/idle_prompt/auth_success/elicitation_* 被过滤不弹 |
 | T15 | 编码 | 看菜单「关闭宠物」「·」分隔、中文卡片 | 无乱码(无「路」等) |
 | T16 | 单实例(Mutex) | 直接**并发**启动 2 个 `pet-resident.ps1`(或先删常驻再并发 2 次 SessionStart) | ~3s 后只剩 1 个 `pet-resident.ps1` 进程,第二个静默自退 |
 | T17 | 多界面并存 | 在 WT/VS Code 终端/PowerShell 同时开 Claude | 各自一张卡;任一 claude.exe 在即不退 |
@@ -128,11 +129,12 @@ public static class Q{
 | T19 | PID 复用安全 | 起一个无关 `powershell -Command Start-Sleep 60`,把它的 PID 写入 `$data\pet.pid`,跑 `pet-toggle.ps1` | 无关进程**不被杀**;toggle 视为"未运行",输出 `on` 并拉起新宠物 |
 | T20 | 资产随版本刷新 | `(Get-Item "$code\strings.json").LastWriteTime = Get-Date`,重启常驻 | `$data\strings.json` 被覆盖(mtime 变新);内容与 `$code` 一致 |
 | T21 | 低延迟(FSW) | 注入一个 attention 会话文件,立即截图 | 卡片近即时更新(≤0.5s,FileSystemWatcher;120ms 轮询仅兜底) |
-| T22 | 即时"需确认"(PermissionRequest) | 真实触发一个权限弹窗,掐表看卡片变琥珀 | ≤1.5s(不等 Notification 的 6s 防打扰);被 allowlist 自动放行的命令**不得**出 attention 卡;6s 后 Notification 兜底到来不得重响提示音。**注**:批准后若命令长跑,卡片保持琥珀直至 PostToolUse——平台无"已批准"事件,**非回归** |
+| T22 | 即时"需确认"(PermissionRequest) | 真实触发一个权限弹窗,掐表看卡片变琥珀 | ≤1.5s(不等 Notification 的 6s 防打扰);被 allowlist 自动放行的命令**不得**出 attention 卡;6s 后 Notification 兜底到来不得重响提示音。批准后的恢复见 T27 |
 | T23 | 模型徽标(仅回合结束态) | 注入带 model 字段的 done / thinking / attention 卡各一张;再注入 5 字段老格式卡 | done 卡显示 `Fable 5 · 已完成 · …`;thinking/attention 卡**不显示**徽标(即使 model 字段有值);老格式卡不报错;无 transcript 的事件(如 permreq)保留已有徽标字段 |
 | T24 | 完成卡=回复摘要(同源) | 造假 transcript:主线 assistant(text+model)在前、`isSidechain:true` 条目在后、结尾再放纯 tool_use 条目,触发 `done` | detail=主线回复首句(剥 markdown、截 60);model 与该条**同源**;sidechain 与 tool_use 条目被跳过;把 text 块全删再触发 `done` → 回退保留原 detail/model;正文提到的模型 ID 不得干扰 |
 | T25 | 菜单不被卡片遮挡 | 有卡片显示时右键宠物打开菜单,保持打开 ≥5s(跨越 ≥2 个置顶重申周期) | 菜单全程完整可见、不被卡片压住;菜单关闭后 ≤2s 置顶重申恢复(T12 不回归) |
-| T26 | 标题跨隐藏/退出存活 | ①改名后把 epoch 拨老 31 分钟;②触发 `end` 再触发新 `prompt`;③把 epoch 拨老 8 天 | ①卡片隐藏但文件与 `.titlelock` 仍在;②`end` 后文件保留(key=idle,epoch 已拨老),新 prompt 复活后标题=改名(未改名则=最初首句,**不得**变成最新输入);③下个轮询周期文件被物理清除 |
+| T26 | 标题跨隐藏/退出存活 | ①改名后把 epoch 拨老 31 分钟;②触发 `end` 再触发新 `prompt`;③把 epoch 拨老 8 天 | ①卡片隐藏但文件与 `.titlelock` 仍在;②`end` 后文件保留(key=idle,epoch 已拨老),新 prompt 复活后标题=改名(未改名则=最初首句,**不得**变成最新输入);③下个轮询周期文件被物理清除(含 `.pending`) |
+| T27 | 认命令翻卡(批准即恢复) | ①真实批准一条长命令(如 `ping -n 20 127.0.0.1`),掐表;②真实**拒绝**一条命令;③批准非命令类(如 Edit);负向守卫用注入法:起一个假父进程,写 attention 卡+`.pending` 指向它(格式见 §2),分别令 a)子进程命令与片段不符 b)子进程先于布防出生(拨老 arm 前先起子进程) | ①批准后 ≤2.5s 卡片翻回"正在思考",`.pending` 被消费;②拒绝→busy 复位且 `.pending` 被清;③无子进程可认,保持琥珀直至 PostToolUse(**非回归**);负向 a/b 均**不得**翻卡(翻了=说谎回归);permreq 对无 command 字段/命令 <6 字符的工具**不布防** |
 
 **T12 找宠物窗口并踩到底层的片段**
 ```powershell
@@ -164,8 +166,9 @@ Start-Sleep -Milliseconds 2600; "after2.6s=$([WZ]::IsTop($h))  # 期望 True"
 6. **重启不重复叮**:常驻重启首轮应静音(`firstPoll`),不要把已有 done/attention 重播(T8)。
 7. **空闲误报**:Notification 的 idle/auth/elicitation 必须过滤(T14)。
 8. **PID 复用误杀 / 双实例**:toggle、session-start 必须先核验进程身份再 Stop/认定在跑(T19);常驻必须持命名 Mutex(T16)。
-9. **删错钩子**:busy 必须挂 PostToolUse(权限批准后复位 attention 的唯一钩子);PreToolUse 在弹窗前触发,挂它等于批准后无人复位(1.0.2 踩过,T14)。
+9. **删错钩子**:busy 必须挂 PostToolUse+PostToolUseFailure(批准后复位 attention 的兜底,对一切工具生效);PreToolUse 在弹窗前触发,挂它等于批准后无人复位(1.0.2 踩过,T14)。
 10. **权限通知的 6 秒**: "需确认"即时性必须靠 PermissionRequest 钩子(async);Notification 有 Claude Code 内置 6s 防打扰延迟,只能当兜底(T22)。
+11. **认命令翻卡不得说谎**:错误命令在跑、或匹配进程早于弹窗出生,都**不得**翻卡(T27 负向);pet-event.ps1 与 pet-resident.ps1 的归一化正则必须逐字一致,改一处必改两处。
 
 ---
 

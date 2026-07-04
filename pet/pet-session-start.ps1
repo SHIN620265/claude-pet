@@ -39,7 +39,7 @@ $file = Join-Path $sessDir $sid
 $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
 $idleRec = (('idle', '空闲', $projOr, '', "$epoch") -join "`t")
 if ($src -eq 'clear') {
-  Remove-Item "$file.titlelock" -Force -ErrorAction SilentlyContinue
+  Remove-Item "$file.titlelock", "$file.pending" -Force -ErrorAction SilentlyContinue
   [IO.File]::WriteAllText($file, $idleRec, (New-Object Text.UTF8Encoding($false)))
 } elseif (-not (Test-Path $file)) {
   [IO.File]::WriteAllText($file, $idleRec, (New-Object Text.UTF8Encoding($false)))

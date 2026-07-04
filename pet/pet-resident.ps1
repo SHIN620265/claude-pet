@@ -345,7 +345,7 @@ $script:dragging = $false; $script:dragOffX = 0; $script:dragOffY = 0
 $now0 = Get-Date
 $script:nextBlink = $now0.AddSeconds((Get-Random -Minimum 2.4 -Maximum 4.0))
 $script:blinkUntil = $now0; $script:reactUntil = $now0; $script:startAt = $now0; $script:lastClaude = $now0
-$script:lastPoll = $now0; $script:lastSpin = $now0; $script:spinIdx = 0
+$script:lastPoll = $now0; $script:lastSpin = $now0; $script:spinIdx = 0; $script:lastPend = $now0
 $script:animOn = $true; try { $script:animOn = [Lp]::AnimationsOn() } catch {}; $script:lastAnimChk = $now0
 $script:lastTop = $now0
 $script:cardShown = $false; $script:cardH = $rowH; $script:lastSig = '__'; $script:hoverRow = -2; $script:xHoverIdx = -1
@@ -385,7 +385,7 @@ function Update-Card {
     # (first-prompt title, rename lock, model badge) must survive so a revived session
     # keeps its identity; physical deletion only after 7 days of silence
     $idleMs = $now - $epoch
-    if ($idleMs -gt 604800000) { Remove-Item $f.FullName, "$($f.FullName).dismiss", "$($f.FullName).titlelock" -Force -ErrorAction SilentlyContinue; continue }
+    if ($idleMs -gt 604800000) { Remove-Item $f.FullName, "$($f.FullName).dismiss", "$($f.FullName).titlelock", "$($f.FullName).pending" -Force -ErrorAction SilentlyContinue; continue }
     if ($idleMs -gt 1800000) { continue }
     $dp = "$($f.FullName).dismiss"
     if (Test-Path $dp) { $de = 0L; [long]::TryParse((RU $dp), [ref]$de) | Out-Null; if ($de -ge $epoch) { continue } }
@@ -529,6 +529,43 @@ $tick.add_Tick({
   if (($now - $script:startAt).TotalSeconds -ge 6 -and ($now - $script:lastClaude).TotalSeconds -ge 2) {
     $script:lastClaude = $now
     if (-not (Get-Process -Name claude -ErrorAction SilentlyContinue)) { [System.Windows.Forms.Application]::Exit() }
+  }
+  # approved-command watch: the platform emits nothing between "user approved" and "tool
+  # finished", so while a card sits on attention with an armed .pending sidecar we look
+  # for the pending command ITSELF running as a child of that session's claude.exe --
+  # born after the dialog appeared. That is proof of approval (never a guess): flip the
+  # card back to thinking. No match -> leave the card alone (recovers on PostToolUse as
+  # before). Runs only while something is pending; cost is one CIM query per 1.2s.
+  if (($now - $script:lastPend).TotalMilliseconds -ge 1200) {
+    $script:lastPend = $now
+    foreach ($pf in @(Get-ChildItem $sessDir -Filter '*.pending' -File -ErrorAction SilentlyContinue)) {
+      $sess = $pf.FullName.Substring(0, $pf.FullName.Length - 8)
+      $c = RU $sess
+      if (-not $c) { Remove-Item $pf.FullName -Force -ErrorAction SilentlyContinue; continue }
+      $p = $c -split "`t"
+      if ($p[0] -ne 'attention') { continue }   # disarm/cleanup is pet-event's job
+      $q = (RU $pf.FullName) -split "`t"
+      if ($q.Count -lt 3) { Remove-Item $pf.FullName -Force -ErrorAction SilentlyContinue; continue }
+      $cpid = 0; [void][int]::TryParse($q[0], [ref]$cpid)
+      $arm = 0L; [void][long]::TryParse($q[1], [ref]$arm)
+      $snip = $q[2]
+      if ($cpid -le 0 -or -not $snip) { Remove-Item $pf.FullName -Force -ErrorAction SilentlyContinue; continue }
+      foreach ($proc in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$cpid" -ErrorAction SilentlyContinue)) {
+        $cl = ($proc.CommandLine + '') -replace '[\s\\"''`]+', ''   # keep in sync with pet-event.ps1
+        if (-not $cl) { continue }
+        if ($cl.Contains('pet-event.ps1')) { continue }   # our own hooks are claude's children too
+        if (-not $cl.Contains($snip)) { continue }
+        $born = 0L
+        try { $born = [DateTimeOffset]::new((Get-Date $proc.CreationDate).ToUniversalTime(), [TimeSpan]::Zero).ToUnixTimeMilliseconds() } catch {}
+        if ($born -le 0 -or $born -lt ($arm - 2000)) { continue }   # predates the dialog -> not ours
+        while ($p.Count -lt 5) { $p += '' }
+        $p[0] = 'thinking'; $p[1] = L 'thinking' $p[1]; $p[4] = "$(& $nowMs)"
+        WU $sess ($p -join "`t")
+        Remove-Item $pf.FullName -Force -ErrorAction SilentlyContinue
+        $script:fsDirty = $true
+        break
+      }
+    }
   }
 })
 

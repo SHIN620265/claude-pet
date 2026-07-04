@@ -1,7 +1,8 @@
 # Hook -> pet per-session state bridge (run under pwsh, UTF-8 safe).
 # Each Claude Code session (session_id) gets its own file under sessions\<id>:
 #   key<TAB>label<TAB>title<TAB>detail<TAB>epochMillis
-# The resident renders one card per live session. Event: prompt | attention | done | idle | end
+# The resident renders one card per live session.
+# Event: prompt | attention | permreq | busy | done | idle | end | answered
 param([string]$Event = 'done')
 $ErrorActionPreference = 'SilentlyContinue'
 $dir = Join-Path $env:USERPROFILE '.claude\pet-data'
@@ -103,6 +104,12 @@ function WriteSession($key, $label, $title, $detail, $model) {
 $projOr = $proj   # may be empty; the resident localizes an empty title to "new session"
 function TitleOr { $t = ExistingTitle; if ($t) { return $t } else { return $projOr } }
 
+# approved-command watch sidecar (sessions\<id>.pending): armed by permreq, consumed by
+# the resident (see MAINTAINERS). Any event other than the two attention writers means
+# the dialog is no longer pending -> disarm so a stale snippet can never match later.
+$pend = "$file.pending"
+if ($Event -ne 'permreq' -and $Event -ne 'attention') { Remove-Item $pend -Force -ErrorAction SilentlyContinue }
+
 switch ($Event) {
   'prompt' {
     $pRaw = ''; if ($j) { $pRaw = [string]$j.prompt }
@@ -141,7 +148,7 @@ switch ($Event) {
     $ignore = ($msg -match '(?i)waiting for') -or ($ntype -eq 'idle_prompt') -or ($ntype -eq 'auth_success')
     if ($cleared) {
       $cur = RU $file; $k0 = ''; if ($cur) { $k0 = ($cur -split "`t")[0] }
-      if ($k0 -eq 'attention') { WriteSession 'thinking' '正在思考' (TitleOr) (ExistingDetail) }
+      if ($k0 -eq 'attention') { Remove-Item $pend -Force -ErrorAction SilentlyContinue; WriteSession 'thinking' '正在思考' (TitleOr) (ExistingDetail) }
       return
     }
     if ($ignore) { return }
@@ -154,6 +161,38 @@ switch ($Event) {
     # The later Notification rewrites the same key, which is idempotent (no second chime).
     Remove-Item $collapse -Force -ErrorAction SilentlyContinue
     WriteSession 'attention' '需要你确认 / 选择' (TitleOr) (ExistingDetail)
+    # Arm the approved-command watch: the platform emits nothing between "user approved"
+    # and "tool finished", but for command-shaped tools the approval's direct consequence
+    # IS observable -- that very command appears as a child process of this claude.exe.
+    # Store the normalized command + the claude PID (our parent; hooks are exec'd directly)
+    # so the resident can flip attention->thinking on proof, never on a guess. Commands
+    # too short to be unambiguous, or tools without a command, stay unarmed (= today's
+    # behavior: the card recovers when the tool finishes). This hook is async -- the CIM
+    # parent lookup does not delay the dialog.
+    $cmd = ''
+    if ($j -and $j.tool_input) { foreach ($k in 'command','script') { if ($j.tool_input.$k) { $cmd = [string]$j.tool_input.$k; break } } }
+    $normCmd = $cmd -replace '[\s\\"''`]+', ''   # keep in sync with pet-resident.ps1
+    if ($normCmd.Length -ge 6) {
+      $cpid = 0
+      try { $cpid = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId } catch {}
+      if ($cpid -gt 0) {
+        if ($normCmd.Length -gt 200) { $normCmd = $normCmd.Substring(0, 200) }
+        $armEpoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+        [IO.File]::WriteAllText($pend, (("$cpid", "$armEpoch", $normCmd) -join "`t"), (New-Object Text.UTF8Encoding($false)))
+      }
+    }
+    # debug trail (tool name + armed flag only -- the command text itself is never logged)
+    $log = Join-Path $dir 'events.log'
+    if ((Test-Path $log) -and ((Get-Item $log).Length -gt 262144)) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+    $tn = ''; if ($j) { $tn = [string]$j.tool_name }
+    try { Add-Content $log -Value ('{0}  permreq  tool={1}  armed={2}' -f (Get-Date -Format 'MM-dd HH:mm:ss'), $tn, $(if (Test-Path $pend) { 1 } else { 0 })) -Encoding UTF8 } catch {}
+  }
+  'answered' {
+    # ElicitationResult hook: the user just answered an elicitation (question dialog).
+    # If the card still says attention it is stale by definition -> back to thinking.
+    # ($pend was already disarmed by the top-of-switch cleanup.)
+    $cur = RU $file; $k0 = ''; if ($cur) { $k0 = ($cur -split "`t")[0] }
+    if ($k0 -eq 'attention') { WriteSession 'thinking' '正在思考' (TitleOr) (ExistingDetail) }
   }
   'done' {
     # turn is over -> swap "your words" for the reply's first line, badge from the same

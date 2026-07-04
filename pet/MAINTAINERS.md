@@ -15,15 +15,17 @@
 
 **运行时文件**(均在 `~/.claude/pet-data`):`lang.txt`(`auto/zh/en/ja`)、`sound.txt`(`on/off`)、
 `pet-state.txt`(开关记忆)、`pet-pos.txt`(位置)、`pet.pid`、`events.log`(调试,超 256KB 自动重建)、
-`sessions\<id>`(+`.dismiss` 关闭标记、`.titlelock` 改名锁定)。随附资产(`strings.json`/wav/png)由常驻
+`sessions\<id>`(+`.dismiss` 关闭标记、`.titlelock` 改名锁定、`.pending` 认命令布防:
+`claudePid<TAB>armEpochMillis<TAB>归一化命令片段`,permreq 布防、其余事件拆防、常驻消费)。随附资产(`strings.json`/wav/png)由常驻
 从插件目录镜像到这里;插件里的副本更新(mtime 变新)即自动覆盖刷新。
 命令:插件自带 `commands/my-pet.md`(`/my-pet`);钩子:插件自带 `hooks/hooks.json`(路径经 `${CLAUDE_PLUGIN_ROOT}` 解析)。
 
 ## 工作原理
 - 钩子驱动状态(插件 `hooks/hooks.json`,所有会话/终端通用):`SessionStart`登记+拉起、`UserPromptSubmit`thinking+取首句标题、
-  `PostToolUse`busy(工具跑完即把 attention 复位;**不挂 PreToolUse**——它在权限弹窗**之前**触发,复位不了"需确认",
+  `PostToolUse`/`PostToolUseFailure`busy(工具跑完/失败即把 attention 复位;**不挂 PreToolUse**——它在权限弹窗**之前**触发,复位不了"需确认",
   只会让每次工具调用多一次 pwsh 冷启动,还把权限弹窗往后垫)、
-  `PermissionRequest`attention(**即时**,`async` 后台跑不拖慢弹窗)、`PermissionDenied`busy(拒绝后你已不被需要)、
+  `PermissionRequest`attention(**即时**,`async` 后台跑不拖慢弹窗;命令类工具**顺带布防 `.pending`**,见下)、`PermissionDenied`busy(拒绝后你已不被需要)、
+  `ElicitationResult`answered(问答弹窗被回答即把 attention 复位,同步防乱序)、
   `Stop`done、`Notification`attention(**兜底**——Claude Code 对权限通知有 6s 防打扰延迟,见坑 10;过滤空闲误报)、`SessionEnd`撤卡。
 - 常驻用 FileSystemWatcher 即时感知 `sessions\` 变化(~120ms 轮询兜底)渲染卡片;每 60ms 跑动画;每 ~2s 查 `Get-Process claude`,无则自杀。
 - 与终端无关:宠物是独立桌面进程,只认进程名 `claude.exe`,钩子在自己的 pwsh 里跑。
@@ -42,9 +44,18 @@
   FileSystemWatcher 即刻渲染;纯观察且不怕乱序的钩子标 `async` 免拖慢主流程;钩子一律用 **exec 直启形式**
   (`command`+`args` 数组)——字符串 command 会先起一层 wrapper shell(Git Bash,实测 60-730ms)再启 pwsh,
   exec 形式把这层砍掉;剩余地板是 pwsh 冷启动(实测 ~0.6-1.2s,方差来自杀软)。
-- **平台信息缺口(设计内滞留,勿当 bug 修)**:批准权限后到工具跑完之间,Claude Code 不产生任何事件
-  (没有 "PermissionGranted"),长命令期间 attention 卡滞留是无解的——不许让宠物"猜"已批准
-  (猜错即说谎)。README 已知限制三语已注明,用户侧口径=命令结束自动恢复。
+- **认命令翻卡(approved-command watch,1.0.10)**:批准权限后到工具跑完之间,Claude Code 依然
+  不产生任何事件(2026-07-04 对 CC 2.1.200 全量 29 个钩子事件核验:无 "PermissionGranted";
+  transcript 在批准时刻也零写入)。但**命令类工具的批准有系统级可观测后果**——那条命令会以
+  claude.exe 子进程的形式出现,命令原文写在子进程 CommandLine 里(实测直接子进程、原文可见)。
+  实现:permreq 把「归一化命令片段(≥6 字符,≤200)+ 父 claude PID + 布防时刻」写入
+  `sessions\<id>.pending`;常驻仅在卡片为 attention 且有 `.pending` 时,每 1.2s 查一次该 PID 的
+  子进程(CIM),**归一化 CommandLine 包含片段 + 出生时间晚于布防(容差 2s)+ 非 pet-event.ps1 自身**
+  三条同时成立才翻回 thinking——是铁证不是猜。认不出(Edit 类无子进程、MCP 长调用、命令进临时脚本
+  文件)一律不动,回落到 PostToolUse 复位,**宁可滞留绝不说谎**。归一化正则
+  (去空白/引号/反斜杠/反引号)在 pet-event.ps1 与 pet-resident.ps1 **两处必须一致**。拆防:除
+  permreq/attention 外的一切事件、`/clear`、7 天清理、以及翻卡本身都会删 `.pending`,杜绝陈旧
+  片段日后误匹配。README 已知限制三语口径=命令类 1-2s 恢复,非命令类等跑完。
 - 模型徽标**只在回合结束态(done/idle)渲染**,回合中(thinking/attention)一律隐藏——正在跑的模型平台不暴露
   (钩子 payload 无 model 字段,settings 只有全局默认),显示"上一条的模型"会被读成"正在思考的模型"而误导。
 - done 卡的 detail = **回复首句摘要**,与徽标取自 transcript(`transcript_path`)尾部**同一条** assistant 消息
@@ -68,7 +79,8 @@
    顺带删 `.titlelock`)才写新 idle 卡;resume / compact / 重登记已有会话时**保持原卡不动**。同理
    `pet-event.ps1` 的 `idle`/`done`/`busy`/`attention` 用 `TitleOr`(保留已有标题),不要直接写 `$projOr`。
 9. **PreToolUse 在权限弹窗"之前"触发**(所以钩子才能代替用户放行/拦截),别指望它把 attention 复位——
-   复位"需确认→思考中"的只能是 `PostToolUse`(工具跑完)。1.0.2 曾删错钩子(留 Pre 删 Post),
+   复位"需确认→思考中"的路径只有两条:`PostToolUse`/`PostToolUseFailure`(工具跑完/失败,兜底、
+   对一切工具生效)+ 常驻认命令翻卡(1.0.10,仅命令类,见最佳实践)。1.0.2 曾删错钩子(留 Pre 删 Post),
    导致用户批准后卡片长时间滞留"需要你确认/选择",1.0.3 修正。
 10. **Notification 的权限通知天生慢 6 秒**:Claude Code 源码里权限弹窗挂载后要等 `ZTc=6000ms`(防打扰,
     6 秒内已响应则不发,不可配置)才发 Notification。"需确认"的即时性靠 `PermissionRequest` 钩子(弹窗即触发,

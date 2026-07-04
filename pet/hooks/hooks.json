@@ -12,6 +12,12 @@
     "PostToolUse": [
       { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "busy"] } ] }
     ],
+    "PostToolUseFailure": [
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "busy"] } ] }
+    ],
+    "ElicitationResult": [
+      { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "answered"] } ] }
+    ],
     "PermissionRequest": [
       { "hooks": [ { "type": "command", "command": "pwsh", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/pet-event.ps1", "permreq"], "async": true } ] }
     ],
