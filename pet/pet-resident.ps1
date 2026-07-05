@@ -2,8 +2,9 @@
 # Pet: transparent per-pixel-alpha layered window (DPI-aware, draggable, blink, gentle bob).
 # Cards: one stacked card per live Claude Code session (sessions\<id>), showing the
 #        conversation title + state (thinking/attention/done/idle) with a braille spinner.
-#        Per row: [x] dismisses that card (reappears on new activity); double-click the
-#        title to rename it (locked so auto-updates won't overwrite).
+#        Per row: [x] dismisses that card (reappears on new activity); the pencil icon
+#        renames it (locked so auto-updates won't overwrite); a single click on the
+#        title/status text jumps to that session's host window (hand cursor = jumpable).
 # Lifecycle: exits when all Claude Code (claude.exe) instances are gone.
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Windows.Forms
@@ -40,6 +41,33 @@ public static class Lp {
     public static bool AnimationsOn(){ try { int v = 1; SystemParametersInfo(0x1042, 0, ref v, 0); return v != 0; } catch { return true; } }   // 0x1042 = SPI_GETCLIENTAREAANIMATION
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);
     public static void Top(IntPtr h){ try { SetWindowPos(h, (IntPtr)(-1), 0, 0, 0, 0, 0x0013); } catch {} }   // HWND_TOPMOST + NOSIZE|NOMOVE|NOACTIVATE
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    public static bool IsWin(IntPtr h){ try { return IsWindow(h); } catch { return false; } }
+    // Bring a top-level window to the foreground. Legit here: this only ever runs from a
+    // click ON the pet, so our process holds the input/foreground grant Windows requires.
+    // Fallback = the classic AttachThreadInput handshake (what window switchers use).
+    public static bool Activate(IntPtr h){
+        try {
+            if (IsIconic(h)) ShowWindow(h, 9);   // SW_RESTORE
+            if (SetForegroundWindow(h)) return true;
+            uint fgPid; uint fgTid = GetWindowThreadProcessId(GetForegroundWindow(), out fgPid);
+            uint myTid = GetCurrentThreadId();
+            if (fgTid != 0 && fgTid != myTid) {
+                AttachThreadInput(myTid, fgTid, true);
+                bool ok = SetForegroundWindow(h);
+                AttachThreadInput(myTid, fgTid, false);
+                return ok;
+            }
+            return false;
+        } catch { return false; }
+    }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; public POINT(int x,int y){X=x;Y=y;} }
     [StructLayout(LayoutKind.Sequential)] public struct SIZE { public int cx, cy; public SIZE(int x,int y){cx=x;cy=y;} }
     [StructLayout(LayoutKind.Sequential, Pack=1)] public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
@@ -142,7 +170,9 @@ function Edit-Row($idx) {
   $sid = $script:rowSids[$idx]; if (-not $sid) { return }
   $cur = ''; $c = RU (Join-Path $sessDir $sid); if ($c) { $cur = ($c -split "`t")[2] }
   $script:editSid = $sid; $script:editing = $true
-  $editBox.Bounds = $rowTitle[$idx].Bounds
+  # editBox is a card-level sibling of the row panels; translate the title's
+  # panel-relative bounds into card coordinates
+  $editBox.SetBounds(($rowPanel[$idx].Left + $rowTitle[$idx].Left), ($rowPanel[$idx].Top + $rowTitle[$idx].Top), $rowTitle[$idx].Width, $rowTitle[$idx].Height)
   $editBox.Text = $cur
   $editBox.Visible = $true; $editBox.BringToFront()
   $card.Activate(); $editBox.Focus(); $editBox.SelectAll()
@@ -158,17 +188,71 @@ function Cancel-Edit {
   $script:editing = $false; $editBox.Visible = $false
 }
 
+# ---- click-to-jump: a card row -> that session's host window ----
+function LogEv($msg) {
+  $log = Join-Path $root 'events.log'
+  if ((Test-Path $log) -and ((Get-Item $log).Length -gt 262144)) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+  try { Add-Content $log -Value ('{0}  {1}' -f (Get-Date -Format 'MM-dd HH:mm:ss'), $msg) -Encoding UTF8 } catch {}
+}
+# Walk up the parent chain from a claude.exe PID to the first ancestor owning a real
+# top-level window (Windows Terminal, VS Code, a plain console, ...). Each ancestor must
+# be born no later than its child (2s slack): a recycled parent PID would otherwise point
+# at an unrelated newer process and we would activate a stranger's window. No window
+# found -> IntPtr.Zero, caller shows the honest head-shake instead of guessing.
+# Perf: ONE bulk CIM query (the per-PID Filter form costs 100-300ms per hop), then the
+# walk happens in memory; callers cache the resolved HWND so repeat jumps are instant.
+function Find-HostWindow([int]$startPid) {
+  $all = @{}
+  foreach ($pr in @(Get-CimInstance -Query 'SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process' -ErrorAction SilentlyContinue)) { $all[[int]$pr.ProcessId] = $pr }
+  $cur = $startPid; $prevBorn = $null
+  for ($d = 0; $d -lt 8; $d++) {
+    if ($cur -le 0 -or -not $all.ContainsKey($cur)) { break }
+    $ci = $all[$cur]
+    $born = $null; try { $born = [DateTime]$ci.CreationDate } catch {}
+    if ($prevBorn -and $born -and $born -gt $prevBorn.AddSeconds(2)) { break }
+    $gp = Get-Process -Id $cur -ErrorAction SilentlyContinue
+    if ($gp -and $gp.MainWindowHandle.ToInt64() -ne 0) { return $gp.MainWindowHandle }
+    if ($born) { $prevBorn = $born }
+    $cur = 0; if ($ci.ParentProcessId) { $cur = [int]$ci.ParentProcessId }
+  }
+  return [IntPtr]::Zero
+}
+function Jump-Row($idx) {
+  if ($script:editing) { return }
+  $sid = $script:rowSids[$idx]; if (-not $sid) { return }
+  $cp = 0; [void][int]::TryParse(($script:rowPids[$idx] + ''), [ref]$cp)
+  $ok = $false; $hv = 0; $hit = 0
+  if ($cp -gt 0) {
+    $gp0 = Get-Process -Id $cp -ErrorAction SilentlyContinue
+    if ($gp0 -and $gp0.ProcessName -eq 'claude') {   # PID recycled by a non-claude process -> never jump
+      $h = [IntPtr]::Zero
+      if ($script:jumpCache.ContainsKey($cp)) {
+        $c = $script:jumpCache[$cp]
+        if ($c -ne [IntPtr]::Zero -and [Lp]::IsWin($c)) { $h = $c; $hit = 1 }
+      }
+      if ($h -eq [IntPtr]::Zero) { $h = Find-HostWindow $cp; $script:jumpCache[$cp] = $h }   # Zero is cached too (stops futile re-warming); a later click re-walks
+      if ($h -ne [IntPtr]::Zero) {
+        $hv = $h.ToInt64(); $ok = [Lp]::Activate($h)
+        if (-not $ok) { $script:jumpCache[$cp] = [IntPtr]::Zero }   # stale target -> drop so the next click re-resolves
+      }
+    }
+  }
+  if (-not $ok) { $script:shakeN = 6 }   # honest feedback: cannot place this session
+  LogEv ('jump idx={0} pid={1} hwnd={2} ok={3} cache={4}' -f $idx, $cp, $hv, [int]$ok, $hit)
+}
+
 $g0 = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $g0.DpiX / 96.0; $g0.Dispose()
 $w = [int](148 * $scale)
 $cardW = [int](312 * $scale)
 $rowH = [int](50 * $scale)
+$rowGap = [int](7 * $scale)   # visual gap between per-session cards (notification-center style)
 $gap = [int](8 * $scale)
 $m = [int](14 * $scale)
 $MAXROWS = 3
 
 $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $script:defX = $wa.Right - $w - [int](44 * $scale)
-$script:defY = $wa.Bottom - $w - ($MAXROWS * $rowH) - $gap - [int](16 * $scale)
+$script:defY = $wa.Bottom - $w - ($MAXROWS * ($rowH + $rowGap) - $rowGap) - $gap - [int](16 * $scale)
 $script:x = $script:defX; $script:y = $script:defY
 if (Test-Path $posPath) {
   $parts = ((RU $posPath) + '').Trim() -split ','
@@ -252,22 +336,58 @@ $card = New-Object CardWin
 $card.FormBorderStyle = 'None'; $card.ShowInTaskbar = $false; $card.TopMost = $true; $card.StartPosition = 'Manual'
 $card.Size = New-Object System.Drawing.Size($cardW, $rowH)
 $card.BackColor = [System.Drawing.Color]::FromArgb(250, 249, 245)
-function Set-CardRegion($h) {
+# the window region is a UNION of per-row rounded rects, so each session renders as its
+# own card with a true gap between (the gap strip is clipped out of the window entirely)
+function Set-CardRegion($rows) {
   $rc = [int](14 * $scale)
   $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
-  $gp.AddArc(0,0,$rc,$rc,180,90); $gp.AddArc($cardW-$rc,0,$rc,$rc,270,90)
-  $gp.AddArc($cardW-$rc,$h-$rc,$rc,$rc,0,90); $gp.AddArc(0,$h-$rc,$rc,$rc,90,90); $gp.CloseAllFigures()
+  for ($ri = 0; $ri -lt $rows; $ri++) {
+    $y0 = $ri * ($rowH + $rowGap)
+    $gp.StartFigure()
+    $gp.AddArc(0, $y0, $rc, $rc, 180, 90); $gp.AddArc($cardW - $rc, $y0, $rc, $rc, 270, 90)
+    $gp.AddArc($cardW - $rc, $y0 + $rowH - $rc, $rc, $rc, 0, 90); $gp.AddArc(0, $y0 + $rowH - $rc, $rc, $rc, 90, 90)
+    $gp.CloseFigure()
+  }
   $card.Region = New-Object System.Drawing.Region($gp)
 }
-Set-CardRegion $rowH
+Set-CardRegion 1
 
 $rowTitle = New-Object 'System.Windows.Forms.Label[]' $MAXROWS
 $rowState = New-Object 'System.Windows.Forms.Label[]' $MAXROWS
 $rowSpin  = New-Object 'System.Windows.Forms.Label[]' $MAXROWS
 $rowClose = New-Object 'System.Windows.Forms.Label[]' $MAXROWS
 $rowEdit  = New-Object 'System.Windows.Forms.Label[]' $MAXROWS
+$rowPanel = New-Object 'System.Windows.Forms.Panel[]' $MAXROWS
 for ($i = 0; $i -lt $MAXROWS; $i++) {
-  $base = $i * $rowH
+  # one Panel per row = the whole card is a single interactive unit: it hover-tints as
+  # one piece and every non-icon pixel (text or blank) is a jump target
+  $pnl = New-Object System.Windows.Forms.Panel
+  $pnl.Location = New-Object System.Drawing.Point(0, ($i * ($rowH + $rowGap)))
+  $pnl.Size = New-Object System.Drawing.Size($cardW, $rowH)
+  $pnl.BackColor = [System.Drawing.Color]::FromArgb(250, 249, 245)
+  $pnl.Tag = $i
+  $pnl.add_Click({ param($snd,$e) Jump-Row ([int]$snd.Tag) })
+  # hover cue: these are floating cards over an ARBITRARY wallpaper (often dark), where
+  # the card's own edge is already max contrast -- a subtle interior line drowns. The
+  # industry analogue here is the focus ring / selected outline, not a list-row tint:
+  # a 2px ring in the mascot's coral marks the hovered card unmistakably on any backdrop
+  $pnl.add_Paint({ param($snd,$e)
+    if ([int]$snd.Tag -ne $script:hoverRow) { return }
+    $rc2 = [int](14 * $scale)
+    $pw = [Math]::Max(2, [int][math]::Round(2 * $scale))
+    $half = [int][math]::Ceiling($pw / 2.0)
+    $x1 = $snd.Width - 1 - $half; $y1 = $snd.Height - 1 - $half
+    $gp2 = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $gp2.AddArc($half, $half, $rc2, $rc2, 180, 90); $gp2.AddArc($x1 - $rc2, $half, $rc2, $rc2, 270, 90)
+    $gp2.AddArc($x1 - $rc2, $y1 - $rc2, $rc2, $rc2, 0, 90); $gp2.AddArc($half, $y1 - $rc2, $rc2, $rc2, 90, 90)
+    $gp2.CloseFigure()
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(217,119,87), ([single]$pw))
+    $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $e.Graphics.DrawPath($pen, $gp2)
+    $pen.Dispose(); $gp2.Dispose()
+  })
+  $card.Controls.Add($pnl); $rowPanel[$i] = $pnl
+  $base = 0   # children live inside the row panel now; offsets are panel-relative
   $t = New-Object System.Windows.Forms.Label
   $t.AutoSize = $false; $t.AutoEllipsis = $true; $t.Tag = $i
   $t.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10.5, [System.Drawing.FontStyle]::Bold)
@@ -275,46 +395,59 @@ for ($i = 0; $i -lt $MAXROWS; $i++) {
   $t.Location = New-Object System.Drawing.Point($m, ($base + [int](6*$scale)))
   $t.Size = New-Object System.Drawing.Size(($cardW - 2*$m - [int](38*$scale)), [int](22*$scale))
   $t.BackColor = [System.Drawing.Color]::Transparent
-  $card.Controls.Add($t); $rowTitle[$i] = $t
+  $t.add_Click({ param($snd,$e) Jump-Row ([int]$snd.Tag) })
+  $pnl.Controls.Add($t); $rowTitle[$i] = $t
   $s = New-Object System.Windows.Forms.Label
-  $s.AutoSize = $false; $s.AutoEllipsis = $true
+  $s.AutoSize = $false; $s.AutoEllipsis = $true; $s.Tag = $i
   $s.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
   $s.ForeColor = [System.Drawing.Color]::FromArgb(90,90,95)
   $s.Location = New-Object System.Drawing.Point($m, ($base + [int](27*$scale)))
   $s.Size = New-Object System.Drawing.Size(($cardW - 2*$m - [int](22*$scale)), [int](20*$scale))
   $s.BackColor = [System.Drawing.Color]::Transparent
-  $card.Controls.Add($s); $rowState[$i] = $s
+  $s.add_Click({ param($snd,$e) Jump-Row ([int]$snd.Tag) })
+  $pnl.Controls.Add($s); $rowState[$i] = $s
   $sp = New-Object System.Windows.Forms.Label
-  $sp.AutoSize = $false; $sp.TextAlign = 'MiddleCenter'
+  $sp.AutoSize = $false; $sp.TextAlign = 'MiddleCenter'; $sp.Tag = $i
+  $sp.add_Click({ param($snd,$e) Jump-Row ([int]$snd.Tag) })
   $sp.Font = New-Object System.Drawing.Font('Consolas', 11, [System.Drawing.FontStyle]::Bold)
   $sp.ForeColor = [System.Drawing.Color]::FromArgb(60,130,210)
   $sp.Location = New-Object System.Drawing.Point(($cardW - $m - [int](16*$scale)), ($base + [int](26*$scale)))
   $sp.Size = New-Object System.Drawing.Size([int](16*$scale), [int](20*$scale))
   $sp.BackColor = [System.Drawing.Color]::Transparent
-  $card.Controls.Add($sp); $rowSpin[$i] = $sp
+  $pnl.Controls.Add($sp); $rowSpin[$i] = $sp
+  # icon buttons get CIRCULAR hover backplates with breathing room (18px chip around an
+  # 8pt glyph) -- the Chrome-tab-x / VS Code pattern; a square plate glued to the glyph
+  # is what made the first attempt look wrong
+  $icoD = [int](18 * $scale)
   $xc = New-Object System.Windows.Forms.Label
   $xc.Text = 'x'; $xc.TextAlign = 'MiddleCenter'; $xc.Cursor = 'Hand'; $xc.Tag = $i
   $xc.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
   $xc.ForeColor = [System.Drawing.Color]::FromArgb(216,216,220)
-  $xc.Location = New-Object System.Drawing.Point(($cardW - [int](17*$scale)), ($base + [int](4*$scale)))
-  $xc.Size = New-Object System.Drawing.Size([int](14*$scale), [int](14*$scale))
+  $xc.Location = New-Object System.Drawing.Point(($cardW - [int](22*$scale)), ($base + [int](3*$scale)))
+  $xc.Size = New-Object System.Drawing.Size($icoD, $icoD)
+  $gpc = New-Object System.Drawing.Drawing2D.GraphicsPath; $gpc.AddEllipse(0, 0, $icoD, $icoD)
+  $xc.Region = New-Object System.Drawing.Region($gpc)
   $xc.BackColor = [System.Drawing.Color]::Transparent
   $xc.add_Click({ param($snd,$e)
     $idx = [int]$snd.Tag; $sid = $script:rowSids[$idx]
     if ($sid) { WU (Join-Path $sessDir "$sid.dismiss") "$(& $nowMs)" }
   })
-  $xc.add_MouseEnter({ param($snd,$e) $script:xHoverIdx = [int]$snd.Tag; $snd.ForeColor = [System.Drawing.Color]::FromArgb(220,70,70) })
-  $xc.add_MouseLeave({ param($snd,$e) $script:xHoverIdx = -1; $snd.ForeColor = [System.Drawing.Color]::FromArgb(150,150,155) })
-  $card.Controls.Add($xc); $xc.BringToFront(); $rowClose[$i] = $xc
+  $xc.add_MouseEnter({ param($snd,$e) $script:xHoverIdx = [int]$snd.Tag; $snd.BackColor = [System.Drawing.Color]::FromArgb(250,224,220); $snd.ForeColor = [System.Drawing.Color]::FromArgb(220,70,70) })
+  $xc.add_MouseLeave({ param($snd,$e) $script:xHoverIdx = -1; $snd.BackColor = [System.Drawing.Color]::Transparent; $snd.ForeColor = [System.Drawing.Color]::FromArgb(150,150,155) })
+  $pnl.Controls.Add($xc); $xc.BringToFront(); $rowClose[$i] = $xc
   $ec = New-Object System.Windows.Forms.Label
   $ec.Text = ([char]0x270E); $ec.TextAlign = 'MiddleCenter'; $ec.Cursor = 'Hand'; $ec.Tag = $i
   $ec.Font = New-Object System.Drawing.Font('Segoe UI Symbol', 8)
   $ec.ForeColor = [System.Drawing.Color]::FromArgb(216,216,220)
-  $ec.Location = New-Object System.Drawing.Point(($cardW - [int](34*$scale)), ($base + [int](4*$scale)))
-  $ec.Size = New-Object System.Drawing.Size([int](15*$scale), [int](14*$scale))
+  $ec.Location = New-Object System.Drawing.Point(($cardW - [int](22*$scale) - $icoD - [int](2*$scale)), ($base + [int](3*$scale)))
+  $ec.Size = New-Object System.Drawing.Size($icoD, $icoD)
+  $gpe = New-Object System.Drawing.Drawing2D.GraphicsPath; $gpe.AddEllipse(0, 0, $icoD, $icoD)
+  $ec.Region = New-Object System.Drawing.Region($gpe)
   $ec.BackColor = [System.Drawing.Color]::Transparent
   $ec.add_Click({ param($snd,$e) Edit-Row ([int]$snd.Tag) })
-  $card.Controls.Add($ec); $ec.BringToFront(); $rowEdit[$i] = $ec
+  $ec.add_MouseEnter({ param($snd,$e) $snd.BackColor = [System.Drawing.Color]::FromArgb(233,230,224); $snd.ForeColor = [System.Drawing.Color]::FromArgb(70,70,80) })
+  $ec.add_MouseLeave({ param($snd,$e) $snd.BackColor = [System.Drawing.Color]::Transparent; $snd.ForeColor = [System.Drawing.Color]::FromArgb(95,95,105) })
+  $pnl.Controls.Add($ec); $ec.BringToFront(); $rowEdit[$i] = $ec
 }
 
 # overflow badge: when more sessions are eligible than rows, a static gray "+N" sits at
@@ -326,10 +459,10 @@ $ovBadge.AutoSize = $false; $ovBadge.TextAlign = 'MiddleRight'
 $ovBadge.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
 $ovBadge.ForeColor = [System.Drawing.Color]::FromArgb(150,150,155)
 $ovBadge.BackColor = [System.Drawing.Color]::Transparent
-$ovBadge.Location = New-Object System.Drawing.Point(($cardW - $m - [int](46*$scale)), ((($MAXROWS - 1) * $rowH) + [int](27*$scale)))
+$ovBadge.Location = New-Object System.Drawing.Point(($cardW - $m - [int](46*$scale)), [int](27*$scale))
 $ovBadge.Size = New-Object System.Drawing.Size([int](28*$scale), [int](20*$scale))
 $ovBadge.Visible = $false
-$card.Controls.Add($ovBadge)
+$rowPanel[$MAXROWS - 1].Controls.Add($ovBadge)   # lives inside the last row card (panel-relative)
 
 # inline edit-in-place textbox (replaces the legacy InputBox); on-brand, edit-in-place
 $editBox = New-Object System.Windows.Forms.TextBox
@@ -364,6 +497,8 @@ $script:animOn = $true; try { $script:animOn = [Lp]::AnimationsOn() } catch {}; 
 $script:lastTop = $now0
 $script:cardShown = $false; $script:cardH = $rowH; $script:lastSig = '__'; $script:hoverRow = -2; $script:xHoverIdx = -1
 $script:lastKeys = @{}; $script:rowKeys = New-Object 'string[]' $MAXROWS; $script:rowSids = New-Object 'string[]' $MAXROWS; $script:firstPoll = $true
+$script:rowPids = New-Object 'string[]' $MAXROWS; $script:shakeN = 0
+$script:jumpCache = @{}; $script:lastWarm = $now0   # claudePid -> host HWND (pre-warmed so the first click is instant)
 $script:fsDirty = $false
 $script:editing = $false; $script:editSid = ''
 $spinChars = @(0x280B,0x2819,0x2839,0x2838,0x283C,0x2834,0x2826,0x2827,0x2807,0x280F) | ForEach-Object { [char]$_ }
@@ -377,6 +512,7 @@ function Render($key) {
   }
 }
 function Place-Card {
+  if ($script:shakeN -gt 0) { return }   # let the head-shake finish; its last tick re-places
   $cx = $script:x + [int]($w/2) - [int]($cardW/2)
   if ($cx -lt ($wa.Left + 4)) { $cx = $wa.Left + 4 }
   if (($cx + $cardW) -gt ($wa.Right - 4)) { $cx = $wa.Right - 4 - $cardW }
@@ -403,7 +539,7 @@ function Update-Card {
     if ($idleMs -gt 1800000) { continue }
     $dp = "$($f.FullName).dismiss"
     if (Test-Path $dp) { $de = 0L; [long]::TryParse((RU $dp), [ref]$de) | Out-Null; if ($de -ge $epoch) { continue } }
-    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$p[2]; detail=$(if($p.Count -ge 4){$p[3]}else{''}); epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}) }
+    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$p[2]; detail=$(if($p.Count -ge 4){$p[3]}else{''}); epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}) }
   }
   # minimal hybrid: float 'attention' (needs you) to the top; everything else stays newest-first
   $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true})
@@ -424,11 +560,11 @@ function Update-Card {
 
   if ((Test-Path $collapsePath) -or $list.Count -eq 0) {
     if ($script:cardShown) { $card.Hide(); $script:cardShown = $false }
-    for ($i=0; $i -lt $MAXROWS; $i++){ $script:rowKeys[$i] = ''; $script:rowSids[$i] = '' }
+    for ($i=0; $i -lt $MAXROWS; $i++){ $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = '' }
     return
   }
 
-  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)" }) -join '##') + "|ov=$overflow"
+  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)|$($_.cpid)" }) -join '##') + "|ov=$overflow"
   if ($sig -ne $script:lastSig) {
     for ($i = 0; $i -lt $MAXROWS; $i++) {
       if ($i -lt $list.Count) {
@@ -442,11 +578,16 @@ function Update-Card {
         $rowState[$i].Text = ($parts -join "  $([char]0x00B7)  ")
         $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
         $rowState[$i].ForeColor = $col
-        $script:rowKeys[$i] = $s.key; $script:rowSids[$i] = $s.sid
-        $rowTitle[$i].Visible = $true; $rowState[$i].Visible = $true; $rowClose[$i].Visible = $true; $rowEdit[$i].Visible = $true
+        # hand cursor = this row can jump (has a recorded claude PID); default = it cannot
+        # (legacy record, heals on the session's next event) -- the affordance never lies
+        $csr = $(if ($s.cpid) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default })
+        $rowTitle[$i].Cursor = $csr; $rowState[$i].Cursor = $csr; $rowPanel[$i].Cursor = $csr
+        $script:rowKeys[$i] = $s.key; $script:rowSids[$i] = $s.sid; $script:rowPids[$i] = $s.cpid
+        if (-not $rowPanel[$i].Visible) { $rowPanel[$i].Visible = $true }
       } else {
-        $rowTitle[$i].Visible = $false; $rowState[$i].Visible = $false; $rowSpin[$i].Visible = $false; $rowClose[$i].Visible = $false; $rowEdit[$i].Visible = $false
-        $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''
+        if ($rowPanel[$i].Visible) { $rowPanel[$i].Visible = $false }
+        $rowSpin[$i].Visible = $false
+        $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = ''
       }
     }
     if ($overflow -gt 0 -and $list.Count -eq $MAXROWS) {
@@ -458,8 +599,8 @@ function Update-Card {
       if ($ovBadge.Visible) { $ovBadge.Visible = $false }
       $rowState[$MAXROWS - 1].Width = $stateNormW
     }
-    $h = $list.Count * $rowH
-    if ($card.Height -ne $h) { $card.Height = $h; Set-CardRegion $h }
+    $h = ($list.Count * ($rowH + $rowGap)) - $rowGap
+    if ($card.Height -ne $h) { $card.Height = $h; Set-CardRegion $list.Count }
     $script:cardH = $h
     $script:lastSig = $sig
   }
@@ -497,6 +638,26 @@ $tick.Interval = 60
 $tick.add_Tick({
   $now = Get-Date
   if (-not $script:editing -and ($script:fsDirty -or ($now - $script:lastPoll).TotalMilliseconds -ge 120)) { $script:fsDirty = $false; $script:lastPoll = $now; Update-Card }
+  # head-shake: brief lateral wiggle of the card = "cannot jump for this row" (no i18n,
+  # no dialog); the final tick snaps the card back via Place-Card (guarded while shaking)
+  if ($script:shakeN -gt 0 -and $script:cardShown) {
+    $script:shakeN--
+    if ($script:shakeN -eq 0) { Place-Card }
+    else { $card.Left = $card.Left + $(if ($script:shakeN % 2) { 6 } else { -6 }) }
+  }
+  # pre-warm at most one unresolved jump target per 2s cycle, so the first click on a
+  # fresh card is a cache hit; failures cache Zero (no futile retries -- a real click
+  # re-walks once as the fallback)
+  if (($now - $script:lastWarm).TotalMilliseconds -ge 2000) {
+    $script:lastWarm = $now
+    for ($i = 0; $i -lt $MAXROWS; $i++) {
+      $cp3 = 0; [void][int]::TryParse(($script:rowPids[$i] + ''), [ref]$cp3)
+      if ($cp3 -gt 0 -and -not $script:jumpCache.ContainsKey($cp3)) {
+        $script:jumpCache[$cp3] = Find-HostWindow $cp3
+        break
+      }
+    }
+  }
   if (($now - $script:lastAnimChk).TotalSeconds -ge 3) { $script:lastAnimChk = $now; try { $script:animOn = [Lp]::AnimationsOn() } catch {} }
   # keep the pet/cards above other windows (Windows silently demotes topmost on focus changes);
   # but don't fight a fullscreen game / presentation / Do-Not-Disturb, and NEVER re-assert
@@ -542,11 +703,21 @@ $tick.add_Tick({
   $hr = -1
   if ($script:cardShown -and $card.Visible) {
     $cpos2 = [System.Windows.Forms.Cursor]::Position
-    if ($card.Bounds.Contains($cpos2)) { $hr = [int][math]::Floor(($cpos2.Y - $card.Top) / $rowH) }
+    if ($card.Bounds.Contains($cpos2)) {
+      $rel = $cpos2.Y - $card.Top; $pitch = $rowH + $rowGap
+      $ri2 = [int][math]::Floor($rel / $pitch)
+      if ($ri2 -lt $MAXROWS -and ($rel - $ri2 * $pitch) -lt $rowH) { $hr = $ri2 }   # cursor in a gap counts as nowhere
+    }
   }
   if ($hr -ne $script:hoverRow) {
     $script:hoverRow = $hr
     for ($i = 0; $i -lt $MAXROWS; $i++) {
+      # two-level hover: the hovered card shifts HUE (light apricot, matching its coral
+      # ring) rather than lightness -- cream->white is a ~2% delta nobody can see, and
+      # hue is the second-most-sensitive visual channel after edges; icons get their
+      # own hover backplates on top
+      $rowPanel[$i].BackColor = $(if ($i -eq $hr) { [System.Drawing.Color]::FromArgb(254,240,233) } else { [System.Drawing.Color]::FromArgb(250,249,245) })
+      $rowPanel[$i].Invalidate()   # repaint the hover border (appears/disappears with $hr)
       $rowEdit[$i].ForeColor = $(if ($i -eq $hr) { [System.Drawing.Color]::FromArgb(95,95,105) } else { [System.Drawing.Color]::FromArgb(216,216,220) })
       $rowClose[$i].ForeColor = $(if ($i -eq $script:xHoverIdx) { [System.Drawing.Color]::FromArgb(220,70,70) } elseif ($i -eq $hr) { [System.Drawing.Color]::FromArgb(150,150,155) } else { [System.Drawing.Color]::FromArgb(216,216,220) })
     }

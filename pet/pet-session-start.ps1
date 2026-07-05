@@ -32,17 +32,36 @@ $projOr = $proj   # may be empty; the resident localizes an empty title to "new 
 $src = ''; if ($j) { $src = [string]$j.source }   # startup | resume | clear | compact
 $file = Join-Path $sessDir $sid
 
+# claude PID (our parent; hooks are exec'd directly by claude.exe) -- session record
+# field 7, the click-to-jump target. Captured on every SessionStart so a resumed
+# session's card follows it into the new claude.exe window.
+$cpid = 0
+try { $cpid = [int](Get-Process -Id $PID -ErrorAction Stop).Parent.Id } catch {}
+if ($cpid -le 0) { try { $cpid = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId } catch {} }
+
 # Register this window's card WITHOUT clobbering an ongoing session's real title/state.
 #   clear   -> conversation reset: fresh idle card + drop the rename lock
 #   new sid -> idle placeholder card
 #   resume / compact / re-register of an existing session -> leave its card untouched
 $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-$idleRec = (('idle', '空闲', $projOr, '', "$epoch") -join "`t")
+$idleRec = (('idle', '空闲', $projOr, '', "$epoch", '', "$cpid") -join "`t")
 if ($src -eq 'clear') {
   Remove-Item "$file.titlelock", "$file.pending" -Force -ErrorAction SilentlyContinue
   [IO.File]::WriteAllText($file, $idleRec, (New-Object Text.UTF8Encoding($false)))
 } elseif (-not (Test-Path $file)) {
   [IO.File]::WriteAllText($file, $idleRec, (New-Object Text.UTF8Encoding($false)))
+} elseif ($cpid -gt 0) {
+  # resume / compact / re-register: the card itself stays untouched (title, state and
+  # epoch are the session's memory -- see MAINTAINERS pitfall 8), but the claude PID
+  # (field 7) must follow the session into its new claude.exe, and this also back-fills
+  # records written before the field existed
+  try {
+    $c = [IO.File]::ReadAllText($file, [Text.Encoding]::UTF8)
+    if ($c) {
+      $p = $c -split "`t"; while ($p.Count -lt 7) { $p += '' }
+      if ($p[6] -ne "$cpid") { $p[6] = "$cpid"; [IO.File]::WriteAllText($file, ($p -join "`t"), (New-Object Text.UTF8Encoding($false))) }
+    }
+  } catch {}
 }
 Remove-Item (Join-Path $dir 'collapsed.flag') -Force -ErrorAction SilentlyContinue
 

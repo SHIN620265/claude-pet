@@ -21,7 +21,7 @@
 命令:插件自带 `commands/my-pet.md`(`/my-pet`);钩子:插件自带 `hooks/hooks.json`(路径经 `${CLAUDE_PLUGIN_ROOT}` 解析)。
 
 ## 工作原理
-- 钩子驱动状态(插件 `hooks/hooks.json`,所有会话/终端通用):`SessionStart`登记+拉起、`UserPromptSubmit`thinking+取首句标题、
+- 钩子驱动状态(插件 `hooks/hooks.json`,所有会话/终端通用):`SessionStart`登记+拉起+刷新 claudePid(第 7 字段)、`UserPromptSubmit`thinking+取首句标题、
   `PostToolUse`/`PostToolUseFailure`busy(工具跑完/失败即把 attention 复位;**不挂 PreToolUse**——它在权限弹窗**之前**触发,复位不了"需确认",
   只会让每次工具调用多一次 pwsh 冷启动,还把权限弹窗往后垫)、
   `PermissionRequest`attention(**即时**,`async` 后台跑不拖慢弹窗;命令类工具**顺带布防 `.pending`**,见下)、`PermissionDenied`busy(拒绝后你已不被需要)、
@@ -58,6 +58,25 @@
   (去空白/引号/反斜杠/反引号)在 pet-event.ps1 与 pet-resident.ps1 **两处必须一致**。拆防:除
   permreq/attention 外的一切事件、`/clear`、7 天清理、以及翻卡本身都会删 `.pending`,杜绝陈旧
   片段日后误匹配。README 已知限制三语口径=命令类 1-2s 恢复,非命令类等跑完。
+- **点卡跳窗(click-to-jump,1.2.0)**:会话记录第 7 字段 = claudePid(pet-event 每事件写入,捕获失败保留旧值不清空;
+  SessionStart 对 resume/compact/老记录**只刷新该字段**,标题/状态/epoch 不动——坑 8 不回归)。单击卡片行的
+  标题/状态文本 → 常驻从该 PID 沿父进程链上爬(≤8 层;祖先出生时间不得晚于子进程 +2s,防父 PID 被系统回收后
+  指向陌生进程),命中第一个持真实顶层窗口的祖先(WT / VS Code / 独立控制台同一算法通吃)→ 最小化先还原 +
+  `SetForegroundWindow`(点击宠物的瞬间本进程持前台授予,调用合法;失败兜底 AttachThreadInput 握手)。跳不了
+  (PID 已死 / 被非 claude 进程复用 / 爬不到窗口 / 老 6 字段记录)→ 卡片横向摇头,**不跳不猜**;手型光标=可跳、
+  默认光标=不可跳,affordance 不说谎。只到窗口级:WT 不切 tab、VS Code 不切内部终端面板(README 已知限制;
+  tab 级精确切换是后续独立刀:WT=AttachConsole 读标题+UIA 选 tab,VS Code=伴生扩展按 terminal.processId)。
+- **分卡视觉+整行 hover(1.2.0,与跳窗同刀)**:每会话一个 Panel 容器(整行含空白皆是跳转命中区),窗体 Region=
+  各行圆角矩形**并集**(行距 7px 缝隙从窗口裁掉,视觉即通知中心式独立卡,缝隙点击穿透);hover 采用**两级层级**
+  区分行点击与行内图标(业界列表模式):整行**提亮为纯白**(底色是暖米白 250,249,245,白=变亮;压暗版被用户
+  否掉)=「这张卡是一个大按钮」,✎/× 悬停各自出**底色背板**(✎ 灰块、× 浅红块+红字;8pt 小图标光换字色不可辨,
+  背板才是 Chrome/VS Code 式图标 hover)=「行内独立小目标」;光标对行与图标都是手型(光标只表可点,不表做什么,
+  与业界一致)。连带:editBox 是卡级兄弟控件,Edit-Row 需把标题的 panel 相对坐标换算回卡坐标;+N 徽章已改挂
+  末行 Panel 内;hover 行计算含缝隙(缝隙=无 hover)。
+- **跳窗延迟治理(1.2.0)**:Find-HostWindow 用**单次批量 CIM**(per-PID Filter 每跳 100-300ms,批量一次 ~0.5s
+  内存爬链);解析结果进 `$script:jumpCache`(claudePid→HWND),常驻每 2s 预热一个未解析目标 → 首次点击即缓存
+  命中(<50ms);失败也缓存 Zero(杜绝无谓重试),真实点击对 Zero 会兜底重爬一次;Activate 失败/IsWindow 失效
+  即丢缓存重解析——缓存只加速,不改变"不跳不猜"语义(T33)。
 - 模型徽标**只在回合结束态(done/idle)渲染**,回合中(thinking/attention)一律隐藏——正在跑的模型平台不暴露
   (钩子 payload 无 model 字段,settings 只有全局默认),显示"上一条的模型"会被读成"正在思考的模型"而误导。
 - done 卡的 detail = **回复首句摘要**,与徽标取自 transcript(`transcript_path`)尾部**同一条** assistant 消息

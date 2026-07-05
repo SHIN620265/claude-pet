@@ -1,6 +1,6 @@
 # Hook -> pet per-session state bridge (run under pwsh, UTF-8 safe).
 # Each Claude Code session (session_id) gets its own file under sessions\<id>:
-#   key<TAB>label<TAB>title<TAB>detail<TAB>epochMillis
+#   key<TAB>label<TAB>title<TAB>detail<TAB>epochMillis<TAB>model<TAB>claudePid
 # The resident renders one card per live session.
 # Event: prompt | attention | permreq | busy | done | idle | end | answered
 param([string]$Event = 'done')
@@ -24,10 +24,17 @@ $cwd = ''; if ($j) { $cwd = [string]$j.cwd }
 $proj = ''; if ($cwd) { $proj = Split-Path $cwd -Leaf }
 $file = Join-Path $sessDir $sid
 
+# claude PID (our parent; hooks are exec'd directly by claude.exe) -- stored as field 7
+# so the resident can jump to this session's host window when its card row is clicked
+$cpid = 0
+try { $cpid = [int](Get-Process -Id $PID -ErrorAction Stop).Parent.Id } catch {}
+if ($cpid -le 0) { try { $cpid = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId } catch {} }
+
 function RU($p) { if (Test-Path $p) { try { return [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8) } catch {} } return '' }
 function ExistingTitle { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 3) { return $p[2] } } return '' }
 function ExistingDetail { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 4) { return $p[3] } } return '' }
 function ExistingModel { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 6) { return $p[5] } } return '' }
+function ExistingPid { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 7) { return $p[6] } } return '' }
 
 # model shown on the card = the model of this session's LAST reply, parsed from the
 # transcript tail. Honest per-session semantics: never claims "current model" (hooks
@@ -97,8 +104,9 @@ if (-not $mdl) { $mdl = ExistingModel }   # events without transcript_path keep 
 
 function WriteSession($key, $label, $title, $detail, $model) {
   if (-not $model) { $model = $mdl }
+  $cp = "$cpid"; if ($cpid -le 0) { $cp = ExistingPid }   # one flaky capture must not wipe a good pid
   $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-  $rec = ($key, $label, $title, $detail, "$epoch", $model) -join "`t"
+  $rec = ($key, $label, $title, $detail, "$epoch", $model, $cp) -join "`t"
   [IO.File]::WriteAllText($file, $rec, (New-Object Text.UTF8Encoding($false)))
 }
 $projOr = $proj   # may be empty; the resident localizes an empty title to "new session"
@@ -173,9 +181,7 @@ switch ($Event) {
     if ($j -and $j.tool_input) { foreach ($k in 'command','script') { if ($j.tool_input.$k) { $cmd = [string]$j.tool_input.$k; break } } }
     $normCmd = $cmd -replace '[\s\\"''`]+', ''   # keep in sync with pet-resident.ps1
     if ($normCmd.Length -ge 6) {
-      $cpid = 0
-      try { $cpid = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId } catch {}
-      if ($cpid -gt 0) {
+      if ($cpid -gt 0) {   # captured once at the top (with CIM fallback), reused here
         if ($normCmd.Length -gt 200) { $normCmd = $normCmd.Substring(0, 200) }
         $armEpoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
         [IO.File]::WriteAllText($pend, (("$cpid", "$armEpoch", $normCmd) -join "`t"), (New-Object Text.UTF8Encoding($false)))
