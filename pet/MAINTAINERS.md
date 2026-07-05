@@ -16,7 +16,8 @@
 **运行时文件**(均在 `~/.claude/pet-data`):`lang.txt`(`auto/zh/en/ja`)、`sound.txt`(`on/off`)、
 `pet-state.txt`(开关记忆)、`pet-pos.txt`(位置)、`pet.pid`、`events.log`(调试,超 256KB 自动重建)、
 `sessions\<id>`(+`.dismiss` 关闭标记、`.titlelock` 改名锁定、`.pending` 认命令布防:
-`claudePid<TAB>armEpochMillis<TAB>归一化命令片段`,permreq 布防、其余事件拆防、常驻消费)。随附资产(`strings.json`/wav/png)由常驻
+`claudePid<TAB>armEpochMillis<TAB>归一化命令片段`,permreq 布防、其余事件拆防、常驻消费)、
+`jump-req-<nonce>.json`(点卡握手请求,唯一名,60s 后由下次写入 GC)/`jump-ack.json`(VS Code 伴生扩展应答;两者都**在数据根目录不在 sessions\**——避开常驻 FSW;见最佳实践"tab 级跳转")。随附资产(`strings.json`/wav/png)由常驻
 从插件目录镜像到这里;插件里的副本更新(mtime 变新)即自动覆盖刷新。
 命令:插件自带 `commands/my-pet.md`(`/my-pet`);钩子:插件自带 `hooks/hooks.json`(路径经 `${CLAUDE_PLUGIN_ROOT}` 解析)。
 
@@ -64,8 +65,24 @@
   指向陌生进程),命中第一个持真实顶层窗口的祖先(WT / VS Code / 独立控制台同一算法通吃)→ 最小化先还原 +
   `SetForegroundWindow`(点击宠物的瞬间本进程持前台授予,调用合法;失败兜底 AttachThreadInput 握手)。跳不了
   (PID 已死 / 被非 claude 进程复用 / 爬不到窗口 / 老 6 字段记录)→ 卡片横向摇头,**不跳不猜**;手型光标=可跳、
-  默认光标=不可跳,affordance 不说谎。只到窗口级:WT 不切 tab、VS Code 不切内部终端面板(README 已知限制;
-  tab 级精确切换是后续独立刀:WT=AttachConsole 读标题+UIA 选 tab,VS Code=伴生扩展按 terminal.processId)。
+  默认光标=不可跳,affordance 不说谎。宠物自身只到窗口级;VS Code 内 tab 级由伴生扩展补全(见下条),
+  WT 的 tab 级仍是后续独立刀(AttachConsole 读标题+UIA 选 tab;`wt focus-tab` CLI 在 1.23/1.24 有
+  开新 tab 回归 #19324,1.25 才修,且 CLI 根本没有 pid→tab 映射,不可依赖)。
+- **VS Code tab 级跳转 = 伴生扩展握手(1.3.0)**:纯外部无法聚焦 VS Code 内部终端面板(Electron 无障碍树
+  不可靠、CLI 无命令口子),业界正解=自装扩展从内部干。常驻在**窗口级跳转成功后**把该会话的祖先 PID 链
+  (Find-HostWindow 爬链的副产品,存 `$script:jumpChain`,预热时已填好 → 缓存命中的点击也拿得到)写入
+  数据根目录 `jump-req-<nonce>.json`(**唯一名**:.tmp 写完 rename 到从不存在的终名,读端只认 *.json 故
+  永不见半截;旧请求 60s 后 GC。初版用 `File.Replace($tmp,$dst,$null)` 踩中坑 13,连点必败已换);每个
+  VS Code 窗口一个扩展实例 `fs.watch` 数据目录,只有"自己 `window.terminals` 的 `processId`(=集成终端
+  shell 的 PID,即 claude 的父 pwsh)命中链中之一"的窗口才 `terminal.show(false)` 并回写 `jump-ack.json`
+  ——**归属是 processId 证明出来的,不是按最顶窗口猜的**(vscode:// URI handler 的"topmost 窗口接收"语义
+  被有意弃用,就因它与窗口激活存在时序 race)。`onStartupFinished` 在窗口(重)载后要滞后数秒才激活,
+  空窗期的点击靠 activate 时**补扫最新仍新鲜的请求**兑现(仍受 5s 过期约束,不兑现陈旧点击)。
+  请求 5s 过期 + nonce 去重,陈旧文件永不误翻;未装扩展则文件
+  惰性,行为=纯窗口级(1.2.0),握手失败不得影响已完成的窗口跳转(Write-JumpRequest 全包 try,只回填
+  events.log 的 `req=` 标志)。扩展源码在仓库顶层 `vscode-ext/claude-pet-jump/`(插件 payload 之外,纯 JS
+  单文件零依赖);本地安装=整目录拷入 `~\.vscode\extensions\shin620265.claude-pet-jump-0.1.0` 后 Reload
+  Window(T35/T36)。
 - **分卡视觉+整行 hover(1.2.0,与跳窗同刀)**:每会话一个 Panel 容器(整行含空白皆是跳转命中区),窗体 Region=
   各行圆角矩形**并集**(行距 7px 缝隙从窗口裁掉,视觉即通知中心式独立卡,缝隙点击穿透);hover 采用**两级层级**
   区分行点击与行内图标(业界列表模式):整行**提亮为纯白**(底色是暖米白 250,249,245,白=变亮;压暗版被用户
@@ -115,7 +132,11 @@
     盖住同层的弹出物。改名编辑框早有守卫(`$script:editing`),右键菜单漏了——1.0.8 补 `-not $menu.Visible`,
     并把菜单改为 owner 形式弹出(`$menu.Show($form,…)`,owned popup 恒在 owner 之上)。以后新增任何
     菜单/tooltip/浮层,都要同步扩这个守卫。
-12. **展示过期 ≠ 数据删除**:TTL 曾"过期即删",把首句标题和 `.titlelock` 改名一并冲掉——会话复活后
+12. **PS 5.1 把 `$null` 塞给 .NET 的 [string] 参数会变空字符串**:`[IO.File]::Replace($tmp,$dst,$null)`
+    的"无备份"重载因此必炸 "The path is not of a legal form"(空串不是合法路径)——首测偶尔通过纯属
+    目标文件恰好不存在走了 Move-Item 分支,连点第二下即败。凡 .NET API 的可空 string 参数:换不含该参
+    的重载、传 `[NullString]::Value`,或干脆改用不需要空值语义的方案(跳转握手最终用唯一文件名 rename)。
+13. **展示过期 ≠ 数据删除**:TTL 曾"过期即删",把首句标题和 `.titlelock` 改名一并冲掉——会话复活后
     标题变成最新输入,违反自家坑 8 的"用户标题不可冲"原则。1.0.9 拆成两层:30 分钟只**隐藏**
     (跳过渲染,文件保留),7 天才物理删除;`SessionEnd` 从删文件改为**把 epoch 拨老**(立即隐藏但保留记忆,
     `claude --resume` 回来改名仍在);`/clear` 仍按设计重置标题。不许回退成"过期即删"。

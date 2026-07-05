@@ -212,24 +212,61 @@ function LogEv($msg) {
 function Find-HostWindow([int]$startPid) {
   $all = @{}
   foreach ($pr in @(Get-CimInstance -Query 'SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process' -ErrorAction SilentlyContinue)) { $all[[int]$pr.ProcessId] = $pr }
+  # side product: the visited ancestor PIDs (claude, its shell, ...) are stashed in
+  # $script:jumpChain -- the VS Code companion handshake needs them to match a terminal,
+  # and capturing here means cache-hit clicks never pay a second CIM walk
+  $chain = New-Object System.Collections.Generic.List[int]
   $cur = $startPid; $prevBorn = $null
   for ($d = 0; $d -lt 8; $d++) {
     if ($cur -le 0 -or -not $all.ContainsKey($cur)) { break }
     $ci = $all[$cur]
     $born = $null; try { $born = [DateTime]$ci.CreationDate } catch {}
     if ($prevBorn -and $born -and $born -gt $prevBorn.AddSeconds(2)) { break }
+    [void]$chain.Add($cur)
     $gp = Get-Process -Id $cur -ErrorAction SilentlyContinue
-    if ($gp -and $gp.MainWindowHandle.ToInt64() -ne 0) { return $gp.MainWindowHandle }
+    if ($gp -and $gp.MainWindowHandle.ToInt64() -ne 0) { $script:jumpChain[$startPid] = $chain.ToArray(); return $gp.MainWindowHandle }
     if ($born) { $prevBorn = $born }
     $cur = 0; if ($ci.ParentProcessId) { $cur = [int]$ci.ParentProcessId }
   }
+  $script:jumpChain[$startPid] = $chain.ToArray()
   return [IntPtr]::Zero
+}
+# Companion-extension handshake (tab-level jump inside VS Code): after a successful
+# window-level activation, drop the session's ancestor PID chain into a UNIQUE
+# jump-req-<nonce>.json at the data ROOT (not sessions\ -- stays out of the
+# FileSystemWatcher). The companion extension instance in the owning VS Code window
+# matches one of these PIDs against its own terminals' shell PIDs and focuses that
+# terminal, then writes jump-ack.json. No extension installed -> the file is inert and
+# the jump stays window-level, exactly the pre-1.3 behavior. Best-effort by design: a
+# failure here must never undo or block the window jump that already happened, so
+# everything is wrapped and the result only feeds the events.log req= flag.
+# Write .tmp then rename to a never-existing final name: readers only match *.json so
+# they never see a half-written file, and no path ever needs replacing. (First cut used
+# File.Replace($tmp,$dst,$null) -- PS 5.1 coerces $null to '' for string parameters,
+# so the no-backup overload ALWAYS threw 'path is not of a legal form'. Unique names
+# also dodge any scanner briefly holding the previous request file.)
+function Write-JumpRequest([int]$cpid) {
+  try {
+    $chain = $script:jumpChain[$cpid]
+    if (-not $chain -or $chain.Count -lt 1) { return 0 }
+    $ep = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $nonce = [Guid]::NewGuid().ToString('N')
+    $json = '{"nonce":"' + $nonce + '","ts":' + $ep + ',"claudePid":' + $cpid + ',"ancestorPids":[' + ($chain -join ',') + ']}'
+    $tmp = Join-Path $root ('jump-req-' + $nonce + '.tmp')
+    $dst = Join-Path $root ('jump-req-' + $nonce + '.json')
+    [IO.File]::WriteAllText($tmp, $json, [Text.Encoding]::ASCII)
+    Move-Item -LiteralPath $tmp -Destination $dst
+    foreach ($old in @(Get-ChildItem $root -Filter 'jump-req-*' -File -ErrorAction SilentlyContinue)) {
+      if (((Get-Date) - $old.LastWriteTime).TotalSeconds -gt 60) { Remove-Item $old.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    return 1
+  } catch { return 0 }
 }
 function Jump-Row($idx) {
   if ($script:editing) { return }
   $sid = $script:rowSids[$idx]; if (-not $sid) { return }
   $cp = 0; [void][int]::TryParse(($script:rowPids[$idx] + ''), [ref]$cp)
-  $ok = $false; $hv = 0; $hit = 0
+  $ok = $false; $hv = 0; $hit = 0; $rq = 0
   if ($cp -gt 0) {
     $gp0 = Get-Process -Id $cp -ErrorAction SilentlyContinue
     if ($gp0 -and $gp0.ProcessName -eq 'claude') {   # PID recycled by a non-claude process -> never jump
@@ -242,11 +279,12 @@ function Jump-Row($idx) {
       if ($h -ne [IntPtr]::Zero) {
         $hv = $h.ToInt64(); $ok = [Lp]::Activate($h)
         if (-not $ok) { $script:jumpCache[$cp] = [IntPtr]::Zero }   # stale target -> drop so the next click re-resolves
+        if ($ok) { $rq = Write-JumpRequest $cp }   # tab-level handshake rides on a successful window jump only
       }
     }
   }
   if (-not $ok) { $script:shakeN = 6 }   # honest feedback: cannot place this session
-  LogEv ('jump idx={0} pid={1} hwnd={2} ok={3} cache={4}' -f $idx, $cp, $hv, [int]$ok, $hit)
+  LogEv ('jump idx={0} pid={1} hwnd={2} ok={3} cache={4} req={5}' -f $idx, $cp, $hv, [int]$ok, $hit, $rq)
 }
 
 $g0 = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $g0.DpiX / 96.0; $g0.Dispose()
@@ -507,6 +545,7 @@ $script:cardShown = $false; $script:cardH = $rowH; $script:lastSig = '__'; $scri
 $script:lastKeys = @{}; $script:rowKeys = New-Object 'string[]' $MAXROWS; $script:rowSids = New-Object 'string[]' $MAXROWS; $script:firstPoll = $true
 $script:rowPids = New-Object 'string[]' $MAXROWS; $script:shakeN = 0
 $script:jumpCache = @{}; $script:lastWarm = $now0   # claudePid -> host HWND (pre-warmed so the first click is instant)
+$script:jumpChain = @{}   # claudePid -> ancestor PID chain from that walk (consumed by the VS Code companion handshake)
 $script:fsDirty = $false
 $script:editing = $false; $script:editSid = ''
 $spinChars = @(0x280B,0x2819,0x2839,0x2838,0x283C,0x2834,0x2826,0x2827,0x2807,0x280F) | ForEach-Object { [char]$_ }
