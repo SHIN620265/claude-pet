@@ -77,6 +77,10 @@
   内存爬链);解析结果进 `$script:jumpCache`(claudePid→HWND),常驻每 2s 预热一个未解析目标 → 首次点击即缓存
   命中(<50ms);失败也缓存 Zero(杜绝无谓重试),真实点击对 Zero 会兜底重爬一次;Activate 失败/IsWindow 失效
   即丢缓存重解析——缓存只加速,不改变"不跳不猜"语义(T33)。
+- **hover 遮挡诚实(1.2.1)**:悬停行判定不能只做几何(Cursor.Position 在卡片矩形内)——右键菜单/任意窗口盖在
+  卡片上时,纯几何会隔窗点亮珊瑚环,而点击根本到不了卡片(affordance 说谎,用户实测抓到)。必须加
+  `WindowFromPoint`+`GetAncestor(GA_ROOT)`==card.Handle 顶层核验(T34)。图标 ✎/× 的 hover 走真实
+  MouseEnter/Leave 消息,天然不穿窗,无需此守卫。
 - 模型徽标**只在回合结束态(done/idle)渲染**,回合中(thinking/attention)一律隐藏——正在跑的模型平台不暴露
   (钩子 payload 无 model 字段,settings 只有全局默认),显示"上一条的模型"会被读成"正在思考的模型"而误导。
 - done 卡的 detail = **回复首句摘要**,与徽标取自 transcript(`transcript_path`)尾部**同一条** assistant 消息

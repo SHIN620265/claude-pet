@@ -50,6 +50,14 @@ public static class Lp {
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     public static bool IsWin(IntPtr h){ try { return IsWindow(h); } catch { return false; } }
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint f);
+    // true only if the TOPMOST window under (x,y) belongs to `top`. A purely geometric
+    // bounds check would light hover states THROUGH a context menu or any overlapping
+    // window -- promising a click that would never reach the card.
+    public static bool HitTop(IntPtr top, int x, int y){
+        try { return GetAncestor(WindowFromPoint(new POINT(x, y)), 2) == top; } catch { return false; }
+    }
     // Bring a top-level window to the foreground. Legit here: this only ever runs from a
     // click ON the pet, so our process holds the input/foreground grant Windows requires.
     // Fallback = the classic AttachThreadInput handshake (what window switchers use).
@@ -703,7 +711,7 @@ $tick.add_Tick({
   $hr = -1
   if ($script:cardShown -and $card.Visible) {
     $cpos2 = [System.Windows.Forms.Cursor]::Position
-    if ($card.Bounds.Contains($cpos2)) {
+    if ($card.Bounds.Contains($cpos2) -and [Lp]::HitTop($card.Handle, $cpos2.X, $cpos2.Y)) {
       $rel = $cpos2.Y - $card.Top; $pitch = $rowH + $rowGap
       $ri2 = [int][math]::Floor($rel / $pitch)
       if ($ri2 -lt $MAXROWS -and ($rel - $ri2 * $pitch) -lt $rowH) { $hr = $ri2 }   # cursor in a gap counts as nowhere
