@@ -31,6 +31,33 @@ public class CardWin : Form {
         get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x00000008; cp.ExStyle |= 0x00000080; return cp; }
     }
 }
+// card-layering knife: a per-pixel-alpha layered card window. LAYERED+TOPMOST+TOOLWINDOW+
+// NOACTIVATE (no TRANSPARENT, so it still gets mouse input). WM_NCHITTEST returns HTCLIENT
+// only over a card body (a rect in HitRects, updated from PS each render) and HTTRANSPARENT
+// everywhere else, so clicks on the shadow pad and inter-card gaps pass through to whatever
+// is beneath -- preserving the old Region window's natural click-through.
+public class LCardWin : Form {
+    public int[] HitRects = new int[0];   // [x,y,w,h,...] card-body rects in client device px
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+        get { CreateParams cp = base.CreateParams;
+            cp.ExStyle |= 0x00080000; cp.ExStyle |= 0x00000008; cp.ExStyle |= 0x00000080; cp.ExStyle |= 0x08000000;
+            return cp; }
+    }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x0084) {   // WM_NCHITTEST
+            int lp = (int)m.LParam; int sx = (short)(lp & 0xFFFF); int sy = (short)((lp >> 16) & 0xFFFF);
+            Point c = PointToClient(new Point(sx, sy));
+            bool body = false; int[] hr = HitRects;
+            for (int i = 0; i + 3 < hr.Length; i += 4) {
+                if (c.X >= hr[i] && c.X < hr[i] + hr[i+2] && c.Y >= hr[i+1] && c.Y < hr[i+1] + hr[i+3]) { body = true; break; }
+            }
+            m.Result = (IntPtr)(body ? 1 : -1);   // HTCLIENT : HTTRANSPARENT
+            return;
+        }
+        base.WndProc(ref m);
+    }
+}
 public static class Lp {
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr v);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
@@ -157,6 +184,22 @@ public static class Lp {
             UpdateLayeredWindow(hwnd, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
         } finally { ReleaseDC(IntPtr.Zero, screenDc); if (old != IntPtr.Zero) SelectObject(memDc, old); if (hBmp != IntPtr.Zero) DeleteObject(hBmp); DeleteDC(memDc); }
     }
+    // ---- layered-card support (card-layering knife, S1+) ----
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    // window rect in DEVICE pixels -- the single source of truth for card geometry + hit-test
+    public static int[] WinRect(IntPtr h){ try { RECT r; if (GetWindowRect(h, out r)) return new int[]{ r.L, r.T, r.R, r.B }; } catch {} return new int[]{0,0,0,0}; }
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
+    public static int Dpi(IntPtr h){ try { uint d = GetDpiForWindow(h); if (d >= 48 && d <= 960) return (int)d; } catch {} return 96; }
+    // push a STRAIGHT-alpha 32bppArgb frame: premultiply ONCE in place (caller passes a
+    // throwaway per-frame bitmap) then UpdateLayeredWindow -- the single-premultiply contract (D8)
+    public static void SetBitmapStraight(IntPtr hwnd, Bitmap bmp, int x, int y){
+        BitmapData bd = bmp.LockBits(new Rectangle(0,0,bmp.Width,bmp.Height), ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+        int n = bd.Stride * bd.Height; byte[] buf = new byte[n]; Marshal.Copy(bd.Scan0, buf, 0, n);
+        for (int i=0;i<n;i+=4){ byte a=buf[i+3]; buf[i]=(byte)(buf[i]*a/255); buf[i+1]=(byte)(buf[i+1]*a/255); buf[i+2]=(byte)(buf[i+2]*a/255); }
+        Marshal.Copy(buf, 0, bd.Scan0, n); bmp.UnlockBits(bd);
+        SetBitmap(hwnd, bmp, x, y);
+    }
 }
 "@
 Add-Type -TypeDefinition $cs -ReferencedAssemblies System.Windows.Forms, System.Drawing
@@ -193,6 +236,122 @@ $nowMs = { [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 # no-ops and jumps stay window-level -- exactly the pre-1.4 behavior.
 $script:wtJump = $false
 try { Add-Type -Path (Join-Path $code 'JumpWt.cs') -ReferencedAssemblies UIAutomationClient, UIAutomationTypes; $script:wtJump = $true } catch {}
+
+# ---- card-layering knife (S1+): render the card stack to a straight-alpha ARGB bitmap for a
+# per-pixel-alpha layered window (smooth AA corners + soft shadow, replacing the aliased Region).
+# Gated by PET_CARD_LAYERED (default off); these functions are INERT until the layered window is
+# wired, so the live pet is untouched. Layers: cached shadow + cached static (rebuilt on content/
+# hover/selection change) composited with a per-frame spinner glyph (D5/D6/D8/D9).
+$script:layered = ($env:PET_CARD_LAYERED -eq '1')
+$script:cardCache = $null; $script:cardList = @(); $script:cardGeom = $null   # layered-card render state
+$script:cardPosX = 0; $script:cardPosY = 0; $script:cardDirty = $false
+function Get-RoundPath($x, $y, $w, $h, $r) {
+  $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $p.AddArc($x, $y, $r, $r, 180, 90); $p.AddArc($x + $w - $r, $y, $r, $r, 270, 90)
+  $p.AddArc($x + $w - $r, $y + $h - $r, $r, $r, 0, 90); $p.AddArc($x, $y + $h - $r, $r, $r, 90, 90)
+  $p.CloseFigure(); return $p
+}
+function Get-CardGeom($sc) {
+  return @{ scale=$sc; cardW=[int](312*$sc); rowH=[int](50*$sc); rowGap=[int](7*$sc); rc=[int](18*$sc); pad=[int](14*$sc); m=[int](14*$sc) }
+}
+# manual AutoEllipsis via GDI+ MeasureString (single measure/draw path, D9), CJK-safe
+function Fit-Text($g, $s, $font, $maxW) {
+  if (-not $s) { return '' }
+  if ($g.MeasureString($s, $font).Width -le $maxW) { return $s }
+  $ell = [string][char]0x2026
+  for ($len = $s.Length - 1; $len -gt 0; $len--) {
+    $t = $s.Substring(0, $len) + $ell
+    if ($g.MeasureString($t, $font).Width -le $maxW) { return $t }
+  }
+  return $ell
+}
+# cached layers: shadow (punched under each card body) + static (fills/ring/text/icons/+N, no spinner)
+function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow) {
+  $rows = $list.Count
+  $W = $gm.cardW + 2*$gm.pad
+  $H = $rows*($gm.rowH + $gm.rowGap) - $gm.rowGap + 2*$gm.pad
+  $shadow = New-Object System.Drawing.Bitmap($W, $H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $g = [System.Drawing.Graphics]::FromImage($shadow)
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias; $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+  $paths = @()
+  for ($i = 0; $i -lt $rows; $i++) {
+    $y = $gm.pad + $i*($gm.rowH + $gm.rowGap)
+    $paths += (Get-RoundPath $gm.pad $y $gm.cardW $gm.rowH $gm.rc)
+    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
+    for ($k = 7; $k -ge 1; $k--) {
+      $a = [int]((8 - $k) * 2)
+      $sp = Get-RoundPath ($gm.pad - $k) ($y + [int](2*$gm.scale) - $k) ($gm.cardW + 2*$k) ($gm.rowH + 2*$k) ($gm.rc + $k)
+      $sb = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb($a, 20, 20, 25)); $g.FillPath($sb, $sp); $sb.Dispose(); $sp.Dispose()
+    }
+  }
+  $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy   # punch card body out of the shadow (D5 shared path)
+  $clr = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(0,0,0,0))
+  foreach ($p in $paths) { $g.FillPath($clr, $p) }
+  $clr.Dispose(); $g.Dispose()
+  $static = New-Object System.Drawing.Bitmap($W, $H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $g = [System.Drawing.Graphics]::FromImage($static)
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias; $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+  $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit   # D9: never ClearType/TextRenderer
+  $fTitle = New-Object System.Drawing.Font('Microsoft YaHei UI', 10.5, [System.Drawing.FontStyle]::Bold)
+  $fStat = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
+  $fIco = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+  $fPen = New-Object System.Drawing.Font('Segoe UI Symbol', 8)
+  $brTitle = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,45,45,50))
+  $brDim = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,216,216,220))
+  $sep = '  ' + [string][char]0x00B7 + '  '
+  for ($i = 0; $i -lt $rows; $i++) {
+    $s = $list[$i]; $y = $gm.pad + $i*($gm.rowH + $gm.rowGap)
+    $lit = ($i -eq $hoverRow -or $i -eq $selRow)
+    $fillCol = $(if ($lit) { [System.Drawing.Color]::FromArgb(255,254,240,233) } else { [System.Drawing.Color]::FromArgb(255,250,249,245) })
+    $fb = New-Object System.Drawing.SolidBrush($fillCol); $g.FillPath($fb, $paths[$i]); $fb.Dispose()
+    if ($lit) {
+      $pw = [Math]::Max(2, [int][math]::Round(2*$gm.scale))
+      $rp = Get-RoundPath ($gm.pad + [int]($pw/2)) ($y + [int]($pw/2)) ($gm.cardW - $pw) ($gm.rowH - $pw) $gm.rc
+      $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255,217,119,87), [single]$pw); $g.DrawPath($pen, $rp); $pen.Dispose(); $rp.Dispose()
+    }
+    $title = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
+    $titleMax = $gm.cardW - 2*$gm.m - [int](38*$gm.scale)
+    $g.DrawString((Fit-Text $g $title $fTitle $titleMax), $fTitle, $brTitle, [single]($gm.pad + $gm.m), [single]($y + [int](6*$gm.scale)))
+    $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle')) { $parts += $s.model }; $parts += (L $s.key $s.label); if ($s.detail) { $parts += $s.detail }
+    $stat = ($parts -join $sep)
+    $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
+    $brS = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, $col.R, $col.G, $col.B))
+    $statMax = $gm.cardW - 2*$gm.m - [int](22*$gm.scale); if ($overflow -gt 0 -and $i -eq ($rows-1)) { $statMax -= [int](30*$gm.scale) }
+    $g.DrawString((Fit-Text $g $stat $fStat $statMax), $fStat, $brS, [single]($gm.pad + $gm.m), [single]($y + [int](27*$gm.scale))); $brS.Dispose()
+    $g.DrawString('x', $fIco, $brDim, [single]($gm.pad + $gm.cardW - [int](20*$gm.scale)), [single]($y + [int](4*$gm.scale)))
+    $g.DrawString([string][char]0x270E, $fPen, $brDim, [single]($gm.pad + $gm.cardW - [int](40*$gm.scale)), [single]($y + [int](4*$gm.scale)))
+  }
+  if ($overflow -gt 0) {
+    $fN = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
+    $brN = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,150,150,155))
+    $yN = $gm.pad + ($rows-1)*($gm.rowH + $gm.rowGap) + [int](27*$gm.scale)
+    $g.DrawString('+' + $overflow, $fN, $brN, [single]($gm.pad + $gm.cardW - $gm.m - [int](44*$gm.scale)), [single]$yN); $fN.Dispose(); $brN.Dispose()
+  }
+  $fTitle.Dispose(); $fStat.Dispose(); $fIco.Dispose(); $fPen.Dispose(); $brTitle.Dispose(); $brDim.Dispose()
+  foreach ($p in $paths) { $p.Dispose() }
+  $g.Dispose()
+  return @{ shadow=$shadow; static=$static; W=$W; H=$H }
+}
+# per-frame compose: cached shadow + cached static + spinner glyph (over the opaque card fill),
+# straight alpha; caller pushes via Lp.SetBitmapStraight (premultiply once, D8)
+function Compose-CardFrame($cache, $list, $gm, $spinChar) {
+  $work = New-Object System.Drawing.Bitmap($cache.W, $cache.H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $g = [System.Drawing.Graphics]::FromImage($work)
+  $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy; $g.Clear([System.Drawing.Color]::FromArgb(0,0,0,0))
+  $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
+  $g.DrawImageUnscaled($cache.shadow, 0, 0); $g.DrawImageUnscaled($cache.static, 0, 0)
+  $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+  $fSpin = New-Object System.Drawing.Font('Consolas', 11, [System.Drawing.FontStyle]::Bold)
+  for ($i = 0; $i -lt $list.Count; $i++) {
+    $k = $list[$i].key; $y = $gm.pad + $i*($gm.rowH + $gm.rowGap); $glyph = ''; $col = $null
+    if ($k -eq 'thinking') { $glyph = [string]$spinChar; $col = [System.Drawing.Color]::FromArgb(255,60,130,210) }
+    elseif ($k -eq 'done') { $glyph = [string][char]0x2713; $col = [System.Drawing.Color]::FromArgb(255,70,170,90) }
+    elseif ($k -eq 'attention') { $glyph = '!'; $col = [System.Drawing.Color]::FromArgb(255,225,150,40) }
+    if ($glyph) { $br = New-Object System.Drawing.SolidBrush($col); $g.DrawString($glyph, $fSpin, $br, [single]($gm.pad + $gm.cardW - $gm.m - [int](16*$gm.scale)), [single]($y + [int](26*$gm.scale))); $br.Dispose() }
+  }
+  $fSpin.Dispose(); $g.Dispose()
+  return $work
+}
 
 # soft synthesized chimes (done = warm ascending; attn = higher quick double)
 $script:sndDone = $null; $script:sndAttn = $null
@@ -506,8 +665,21 @@ Update-LangChecks
 $script:lastLang = ((RU (Join-Path $root 'lang.txt')) + '').Trim()
 
 # ---- multi-row card ----
-$card = New-Object CardWin
+# card-layering knife: when PET_CARD_LAYERED, the card is a per-pixel-alpha layered window
+# (PetWin's exstyle = LAYERED+TOPMOST+TOOLWINDOW+NOACTIVATE) rendered to a bitmap; the child
+# controls below are still created but stay inert/invisible under the layered surface (S1 read-only).
+$card = if ($script:layered) { New-Object LCardWin } else { New-Object CardWin }
 $card.FormBorderStyle = 'None'; $card.ShowInTaskbar = $false; $card.TopMost = $true; $card.StartPosition = 'Manual'
+if ($script:layered) {
+  # S2: a click on a card body (WM_NCHITTEST already filtered out gaps/shadow) -> jump that
+  # row. $e is client (bitmap) coords; subtract the shadow pad and divide by the row pitch.
+  $card.add_MouseClick({ param($snd, $e)
+    $p = [int](14 * $scale); $pitch = $rowH + $rowGap
+    $rel = $e.Y - $p; if ($rel -lt 0) { return }
+    $ri = [int][math]::Floor($rel / $pitch)
+    if ($ri -ge 0 -and $ri -lt $MAXROWS -and ($rel - $ri * $pitch) -lt $rowH -and $script:rowSids[$ri]) { Jump-Row $ri }
+  })
+}
 $card.Size = New-Object System.Drawing.Size($cardW, $rowH)
 $card.BackColor = [System.Drawing.Color]::FromArgb(250, 249, 245)
 # the window region is a UNION of per-row rounded rects, so each session renders as its
@@ -524,7 +696,7 @@ function Set-CardRegion($rows) {
   }
   $card.Region = New-Object System.Drawing.Region($gp)
 }
-Set-CardRegion 1
+if (-not $script:layered) { Set-CardRegion 1 }   # a region would clip the layered ULW bitmap
 
 $rowTitle = New-Object 'System.Windows.Forms.Label[]' $MAXROWS
 $rowState = New-Object 'System.Windows.Forms.Label[]' $MAXROWS
@@ -697,7 +869,11 @@ function Place-Card {
   if (($cx + $cardW) -gt ($wa.Right - 4)) { $cx = $wa.Right - 4 - $cardW }
   $cy = $script:y + $w + $gap
   if (($cy + $script:cardH) -gt ($wa.Bottom - 4)) { $cy = $script:y - $script:cardH - $gap }
-  if ($card.Left -ne $cx -or $card.Top -ne $cy) { $card.Left = $cx; $card.Top = $cy }
+  if ($script:layered) {
+    # the layered window is bigger than the card content by the shadow pad on every side;
+    # store the screen origin so the frame push (UpdateLayeredWindow) positions it there
+    $p = [int](14 * $scale); $script:cardPosX = $cx - $p; $script:cardPosY = $cy - $p
+  } elseif ($card.Left -ne $cx -or $card.Top -ne $cy) { $card.Left = $cx; $card.Top = $cy }
 }
 function Update-Card {
   $now = & $nowMs
@@ -744,7 +920,30 @@ function Update-Card {
   }
 
   $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)|$($_.cpid)" }) -join '##') + "|ov=$overflow"
-  if ($sig -ne $script:lastSig) {
+  if ($script:layered) {
+    # layered path: rebuild the cached shadow+static layers on any content/hover/selection
+    # change; the tick composes the spinner frame and pushes. Row maps stay in sync for jump.
+    $srIdx = -1; if ($script:selectedSid) { for ($i = 0; $i -lt $list.Count; $i++) { if ($list[$i].sid -eq $script:selectedSid) { $srIdx = $i; break } } }
+    $lsig = $sig + "|hv$($script:hoverRow)|sr$srIdx"
+    if ($lsig -ne $script:lastSig) {
+      $gm = Get-CardGeom $scale
+      if ($script:cardCache) { $script:cardCache.shadow.Dispose(); $script:cardCache.static.Dispose(); $script:cardCache = $null }
+      $script:cardCache = Build-CardStatic $list $gm $script:hoverRow $srIdx $overflow
+      $script:cardList = $list; $script:cardGeom = $gm
+      $card.Size = New-Object System.Drawing.Size($script:cardCache.W, $script:cardCache.H)
+      # WM_NCHITTEST hit rects: one card-body rect per visible row (client device px) so the
+      # window only captures clicks on a card body; gaps/shadow pass through (S2, alpha-aware)
+      $hitr = New-Object System.Collections.Generic.List[int]
+      for ($i = 0; $i -lt $list.Count; $i++) { [void]$hitr.Add($gm.pad); [void]$hitr.Add($gm.pad + $i*($gm.rowH + $gm.rowGap)); [void]$hitr.Add($gm.cardW); [void]$hitr.Add($gm.rowH) }
+      $card.HitRects = $hitr.ToArray()
+      for ($i = 0; $i -lt $MAXROWS; $i++) {
+        if ($i -lt $list.Count) { $script:rowKeys[$i] = $list[$i].key; $script:rowSids[$i] = $list[$i].sid; $script:rowPids[$i] = $list[$i].cpid }
+        else { $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = '' }
+      }
+      $script:cardH = ($list.Count * ($rowH + $rowGap)) - $rowGap
+      $script:lastSig = $lsig; $script:cardDirty = $true
+    }
+  } elseif ($sig -ne $script:lastSig) {
     for ($i = 0; $i -lt $MAXROWS; $i++) {
       if ($i -lt $list.Count) {
         $s = $list[$i]
@@ -860,6 +1059,16 @@ $tick.add_Tick({
   if ($script:cardShown -and ($now - $script:lastSpin).TotalMilliseconds -ge 90) {
     $script:lastSpin = $now; $script:spinIdx = ($script:spinIdx + 1) % $spinChars.Count
     $ch = $(if ($script:animOn) { $spinChars[$script:spinIdx] } else { $staticSpin })
+    if ($script:layered) {
+      # recompose cached layers + this spinner frame and push (D6). Only when a thinking
+      # card is animating or the cache just changed -- static states need no repush.
+      $anim = $false; for ($i = 0; $i -lt $MAXROWS; $i++) { if ($script:rowKeys[$i] -eq 'thinking') { $anim = $true; break } }
+      if (($script:cardDirty -or $anim) -and $script:cardCache) {
+        $work = Compose-CardFrame $script:cardCache $script:cardList $script:cardGeom $ch
+        try { [Lp]::SetBitmapStraight($card.Handle, $work, $script:cardPosX, $script:cardPosY) } catch {}
+        $work.Dispose(); $script:cardDirty = $false
+      }
+    } else {
     for ($i = 0; $i -lt $MAXROWS; $i++) {
       $k = $script:rowKeys[$i]
       if ($k -eq 'thinking') {
@@ -877,10 +1086,11 @@ $tick.add_Tick({
         if ($rowSpin[$i].Visible) { $rowSpin[$i].Visible = $false; $rowSpin[$i].Text = '' }
       }
     }
+    }
   }
   # dim row action icons by default; brighten the row currently under the cursor
   $hr = -1
-  if ($script:cardShown -and $card.Visible) {
+  if (-not $script:layered -and $script:cardShown -and $card.Visible) {
     $cpos2 = [System.Windows.Forms.Cursor]::Position
     if ($card.Bounds.Contains($cpos2) -and [Lp]::HitTop($card.Handle, $cpos2.X, $cpos2.Y)) {
       $rel = $cpos2.Y - $card.Top; $pitch = $rowH + $rowGap
