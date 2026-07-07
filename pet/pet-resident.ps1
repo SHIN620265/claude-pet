@@ -321,7 +321,7 @@ function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow, $hoverIcon)
     $title = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
     $titleMax = $gm.cardW - 2*$gm.m - [int](38*$gm.scale)
     $g.DrawString((Fit-Text $g $title $fTitle $titleMax), $fTitle, $brTitle, [single]($gm.pad + $gm.m), [single]($y + [int](6*$gm.scale)))
-    $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle')) { $parts += $s.model }; $parts += (L $s.key $s.label); if ($s.detail) { $parts += $s.detail }
+    $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += (L $s.key $s.label); if ($s.detail) { $parts += $s.detail }
     $stat = ($parts -join $sep)
     $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
     $brS = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, $col.R, $col.G, $col.B))
@@ -535,7 +535,7 @@ function Jump-Tab($h, $cp, $sid) {
   $c = RU (Join-Path $sessDir $sid)
   if ($c) { $pp = $c -split "`t"; $st = $pp[0]; if ($pp.Count -ge 8) { $fp = $pp[7] } }
   $armed = Test-Path (Join-Path $sessDir "$sid.pending")
-  if (($st -eq 'done' -or $st -eq 'idle' -or $st -eq 'attention') -and -not $armed -and $fp) {
+  if (($st -eq 'done' -or $st -eq 'idle' -or $st -eq 'attention' -or $st -eq 'interrupted') -and -not $armed -and $fp) {
     $r = 0; try { $r = [PetWtJump]::TryFocusTab($h, $fp) } catch { $r = 0 }
     if ($r -eq 1) { return '1' }
   }
@@ -901,6 +901,7 @@ $stateColors = @{
   attention = [System.Drawing.Color]::FromArgb(225,150,40)
   done      = [System.Drawing.Color]::FromArgb(70,170,90)
   idle      = [System.Drawing.Color]::FromArgb(140,140,145)
+  interrupted = [System.Drawing.Color]::FromArgb(120,118,126)   # user-stopped: neutral/calm (grey, not red -- interrupting is a normal choice, not an error)
 }
 
 # ---- state ----
@@ -1026,7 +1027,7 @@ function Update-Card {
         # status line: [model badge, post-turn states only] . state . detail
         # mid-turn (thinking/attention) the badge would read as "the model currently
         # running", which we cannot truthfully know -- so it only renders on done/idle
-        $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle')) { $parts += $s.model }; $parts += $lab; if ($s.detail) { $parts += $s.detail }
+        $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += $lab; if ($s.detail) { $parts += $s.detail }
         $rowState[$i].Text = ($parts -join "  $([char]0x00B7)  ")
         $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
         $rowState[$i].ForeColor = $col
@@ -1269,10 +1270,10 @@ $tick.add_Tick({
       if (-not $tpI) { continue }
       if (Test-Interrupted $tpI) {
         while ($p.Count -lt 9) { $p += '' }
-        $p[0] = 'idle'; $p[1] = L 'idle' 'idle'; $p[4] = "$(& $nowMs)"
+        $p[0] = 'interrupted'; $p[1] = L 'interrupted' 'interrupted'; $p[4] = "$(& $nowMs)"
         WU $sess ($p -join "`t")
         $script:fsDirty = $true
-        LogEv ('interrupt->idle sid={0}' -f $sid)
+        LogEv ('interrupt->interrupted sid={0}' -f $sid)
       }
     }
   }
