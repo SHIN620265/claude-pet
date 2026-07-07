@@ -242,7 +242,7 @@ try { Add-Type -Path (Join-Path $code 'JumpWt.cs') -ReferencedAssemblies UIAutom
 # Gated by PET_CARD_LAYERED (default off); these functions are INERT until the layered window is
 # wired, so the live pet is untouched. Layers: cached shadow + cached static (rebuilt on content/
 # hover/selection change) composited with a per-frame spinner glyph (D5/D6/D8/D9).
-$script:layered = ($env:PET_CARD_LAYERED -eq '1')
+$script:layered = ($env:PET_CARD_LAYERED -eq '1') -or (Test-Path (Join-Path $root 'card-layered.flag'))   # opt-in dogfood pin (survives session restarts; delete the flag to revert to the Region card)
 $script:cardCache = $null; $script:cardList = @(); $script:cardGeom = $null   # layered-card render state
 $script:cardPosX = 0; $script:cardPosY = 0; $script:cardDirty = $false; $script:hoverIcon = 0
 function Get-RoundPath($x, $y, $w, $h, $r) {
@@ -252,7 +252,7 @@ function Get-RoundPath($x, $y, $w, $h, $r) {
   $p.CloseFigure(); return $p
 }
 function Get-CardGeom($sc) {
-  return @{ scale=$sc; cardW=[int](312*$sc); rowH=[int](50*$sc); rowGap=[int](7*$sc); rc=[int](18*$sc); pad=[int](14*$sc); m=[int](14*$sc) }
+  return @{ scale=$sc; cardW=[int](312*$sc); rowH=[int](50*$sc); rowGap=[int](7*$sc); rc=[int](16*$sc); pad=[int](14*$sc); m=[int](14*$sc) }
 }
 # icon chip geometry for a row (client device px, top-right): the SAME source for rendering,
 # hover and hit-test (design S3/#10). $ry = the row's top y in client coords.
