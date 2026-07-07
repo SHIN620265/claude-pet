@@ -244,7 +244,7 @@ try { Add-Type -Path (Join-Path $code 'JumpWt.cs') -ReferencedAssemblies UIAutom
 # hover/selection change) composited with a per-frame spinner glyph (D5/D6/D8/D9).
 $script:layered = ($env:PET_CARD_LAYERED -eq '1')
 $script:cardCache = $null; $script:cardList = @(); $script:cardGeom = $null   # layered-card render state
-$script:cardPosX = 0; $script:cardPosY = 0; $script:cardDirty = $false
+$script:cardPosX = 0; $script:cardPosY = 0; $script:cardDirty = $false; $script:hoverIcon = 0
 function Get-RoundPath($x, $y, $w, $h, $r) {
   $p = New-Object System.Drawing.Drawing2D.GraphicsPath
   $p.AddArc($x, $y, $r, $r, 180, 90); $p.AddArc($x + $w - $r, $y, $r, $r, 270, 90)
@@ -253,6 +253,15 @@ function Get-RoundPath($x, $y, $w, $h, $r) {
 }
 function Get-CardGeom($sc) {
   return @{ scale=$sc; cardW=[int](312*$sc); rowH=[int](50*$sc); rowGap=[int](7*$sc); rc=[int](18*$sc); pad=[int](14*$sc); m=[int](14*$sc) }
+}
+# icon chip geometry for a row (client device px, top-right): the SAME source for rendering,
+# hover and hit-test (design S3/#10). $ry = the row's top y in client coords.
+function Get-IconChips($gm, $ry) {
+  $d = [int](18 * $gm.scale)
+  $xL = $gm.pad + $gm.cardW - [int](22 * $gm.scale)   # [x] chip left
+  $pL = $xL - $d - [int](2 * $gm.scale)                # pencil chip left
+  $t = $ry + [int](3 * $gm.scale); $r = [int]($d / 2)
+  return @{ d=$d; r=$r; x=@{ left=$xL; top=$t; cx=($xL+$r); cy=($t+$r); r=$r }; pen=@{ left=$pL; top=$t; cx=($pL+$r); cy=($t+$r); r=$r } }
 }
 # manual AutoEllipsis via GDI+ MeasureString (single measure/draw path, D9), CJK-safe
 function Fit-Text($g, $s, $font, $maxW) {
@@ -266,7 +275,7 @@ function Fit-Text($g, $s, $font, $maxW) {
   return $ell
 }
 # cached layers: shadow (punched under each card body) + static (fills/ring/text/icons/+N, no spinner)
-function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow) {
+function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow, $hoverIcon) {
   $rows = $list.Count
   $W = $gm.cardW + 2*$gm.pad
   $H = $rows*($gm.rowH + $gm.rowGap) - $gm.rowGap + 2*$gm.pad
@@ -318,8 +327,18 @@ function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow) {
     $brS = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, $col.R, $col.G, $col.B))
     $statMax = $gm.cardW - 2*$gm.m - [int](22*$gm.scale); if ($overflow -gt 0 -and $i -eq ($rows-1)) { $statMax -= [int](30*$gm.scale) }
     $g.DrawString((Fit-Text $g $stat $fStat $statMax), $fStat, $brS, [single]($gm.pad + $gm.m), [single]($y + [int](27*$gm.scale))); $brS.Dispose()
-    $g.DrawString('x', $fIco, $brDim, [single]($gm.pad + $gm.cardW - [int](20*$gm.scale)), [single]($y + [int](4*$gm.scale)))
-    $g.DrawString([string][char]0x270E, $fPen, $brDim, [single]($gm.pad + $gm.cardW - [int](40*$gm.scale)), [single]($y + [int](4*$gm.scale)))
+    $chips = Get-IconChips $gm $y
+    $rowHover = ($i -eq $hoverRow)
+    if ($rowHover -and $hoverIcon -eq 1) {
+      $cb = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,250,224,220)); $g.FillEllipse($cb, $chips.x.left, $chips.x.top, $chips.d, $chips.d); $cb.Dispose()
+      $xc = [System.Drawing.Color]::FromArgb(255,220,70,70)
+    } elseif ($rowHover) { $xc = [System.Drawing.Color]::FromArgb(255,150,150,155) } else { $xc = [System.Drawing.Color]::FromArgb(255,216,216,220) }
+    $bx = New-Object System.Drawing.SolidBrush($xc); $zx = $g.MeasureString('x', $fIco); $g.DrawString('x', $fIco, $bx, [single]($chips.x.cx - $zx.Width/2), [single]($chips.x.cy - $zx.Height/2)); $bx.Dispose()
+    if ($rowHover -and $hoverIcon -eq 2) {
+      $cb = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,233,230,224)); $g.FillEllipse($cb, $chips.pen.left, $chips.pen.top, $chips.d, $chips.d); $cb.Dispose()
+      $pc = [System.Drawing.Color]::FromArgb(255,70,70,80)
+    } elseif ($rowHover) { $pc = [System.Drawing.Color]::FromArgb(255,95,95,105) } else { $pc = [System.Drawing.Color]::FromArgb(255,216,216,220) }
+    $penG = [string][char]0x270E; $bp = New-Object System.Drawing.SolidBrush($pc); $zp = $g.MeasureString($penG, $fPen); $g.DrawString($penG, $fPen, $bp, [single]($chips.pen.cx - $zp.Width/2), [single]($chips.pen.cy - $zp.Height/2)); $bp.Dispose()
   }
   if ($overflow -gt 0) {
     $fN = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
@@ -674,10 +693,19 @@ if ($script:layered) {
   # S2: a click on a card body (WM_NCHITTEST already filtered out gaps/shadow) -> jump that
   # row. $e is client (bitmap) coords; subtract the shadow pad and divide by the row pitch.
   $card.add_MouseClick({ param($snd, $e)
-    $p = [int](14 * $scale); $pitch = $rowH + $rowGap
-    $rel = $e.Y - $p; if ($rel -lt 0) { return }
+    $gm = $script:cardGeom; if (-not $gm) { return }
+    $pitch = $gm.rowH + $gm.rowGap; $rel = $e.Y - $gm.pad; if ($rel -lt 0) { return }
     $ri = [int][math]::Floor($rel / $pitch)
-    if ($ri -ge 0 -and $ri -lt $MAXROWS -and ($rel - $ri * $pitch) -lt $rowH -and $script:rowSids[$ri]) { Jump-Row $ri }
+    if ($ri -lt 0 -or $ri -ge $MAXROWS -or ($rel - $ri * $pitch) -ge $gm.rowH -or -not $script:rowSids[$ri]) { return }
+    $chips = Get-IconChips $gm ($gm.pad + $ri * $pitch)   # priority: [x] > pencil > row jump
+    $dx = $e.X - $chips.x.cx; $dy = $e.Y - $chips.x.cy
+    if (($dx*$dx + $dy*$dy) -le ($chips.x.r * $chips.x.r)) {
+      $sid = $script:rowSids[$ri]; if ($sid) { WU (Join-Path $sessDir "$sid.dismiss") "$(& $nowMs)" }   # [x] -> dismiss
+      return
+    }
+    $dx = $e.X - $chips.pen.cx; $dy = $e.Y - $chips.pen.cy
+    if (($dx*$dx + $dy*$dy) -le ($chips.pen.r * $chips.pen.r)) { return }   # pencil -> rename (S4, deferred)
+    Jump-Row $ri
   })
 }
 $card.Size = New-Object System.Drawing.Size($cardW, $rowH)
@@ -924,11 +952,11 @@ function Update-Card {
     # layered path: rebuild the cached shadow+static layers on any content/hover/selection
     # change; the tick composes the spinner frame and pushes. Row maps stay in sync for jump.
     $srIdx = -1; if ($script:selectedSid) { for ($i = 0; $i -lt $list.Count; $i++) { if ($list[$i].sid -eq $script:selectedSid) { $srIdx = $i; break } } }
-    $lsig = $sig + "|hv$($script:hoverRow)|sr$srIdx"
+    $lsig = $sig + "|hv$($script:hoverRow)|hi$($script:hoverIcon)|sr$srIdx"
     if ($lsig -ne $script:lastSig) {
       $gm = Get-CardGeom $scale
       if ($script:cardCache) { $script:cardCache.shadow.Dispose(); $script:cardCache.static.Dispose(); $script:cardCache = $null }
-      $script:cardCache = Build-CardStatic $list $gm $script:hoverRow $srIdx $overflow
+      $script:cardCache = Build-CardStatic $list $gm $script:hoverRow $srIdx $overflow $script:hoverIcon
       $script:cardList = $list; $script:cardGeom = $gm
       $card.Size = New-Object System.Drawing.Size($script:cardCache.W, $script:cardCache.H)
       # WM_NCHITTEST hit rects: one card-body rect per visible row (client device px) so the
@@ -1088,9 +1116,28 @@ $tick.add_Tick({
     }
     }
   }
+  if ($script:layered) {
+    # layered hover: hovered row + icon from the card's screen origin (cardPosX/Y), occlusion-
+    # honest via HitTop (WM_NCHITTEST makes gaps/shadow transparent, so HitTop is true only over
+    # an actionable card body). Feeds the cache rebuild in Update-Card via lsig.
+    $hr = -1; $hi = 0
+    if ($script:cardShown -and $card.Visible -and $script:cardGeom) {
+      $cp = [System.Windows.Forms.Cursor]::Position
+      if ([Lp]::HitTop($card.Handle, $cp.X, $cp.Y)) {
+        $gm = $script:cardGeom; $rx = $cp.X - $script:cardPosX; $ry = $cp.Y - $script:cardPosY
+        $rel = $ry - $gm.pad; $pitch = $gm.rowH + $gm.rowGap; $ri2 = [int][math]::Floor($rel / $pitch)
+        if ($ri2 -ge 0 -and $ri2 -lt $script:cardList.Count -and ($rel - $ri2 * $pitch) -lt $gm.rowH) {
+          $hr = $ri2; $chips = Get-IconChips $gm ($gm.pad + $ri2 * $pitch)
+          if ((($rx - $chips.x.cx) * ($rx - $chips.x.cx) + ($ry - $chips.x.cy) * ($ry - $chips.x.cy)) -le ($chips.x.r * $chips.x.r)) { $hi = 1 }
+          elseif ((($rx - $chips.pen.cx) * ($rx - $chips.pen.cx) + ($ry - $chips.pen.cy) * ($ry - $chips.pen.cy)) -le ($chips.pen.r * $chips.pen.r)) { $hi = 2 }
+        }
+      }
+    }
+    if ($hr -ne $script:hoverRow -or $hi -ne $script:hoverIcon) { $script:hoverRow = $hr; $script:hoverIcon = $hi }
+  } else {
   # dim row action icons by default; brighten the row currently under the cursor
   $hr = -1
-  if (-not $script:layered -and $script:cardShown -and $card.Visible) {
+  if ($script:cardShown -and $card.Visible) {
     $cpos2 = [System.Windows.Forms.Cursor]::Position
     if ($card.Bounds.Contains($cpos2) -and [Lp]::HitTop($card.Handle, $cpos2.X, $cpos2.Y)) {
       $rel = $cpos2.Y - $card.Top; $pitch = $rowH + $rowGap
@@ -1115,6 +1162,7 @@ $tick.add_Tick({
       $rowEdit[$i].ForeColor = $(if ($i -eq $hr) { [System.Drawing.Color]::FromArgb(95,95,105) } else { [System.Drawing.Color]::FromArgb(216,216,220) })
       $rowClose[$i].ForeColor = $(if ($i -eq $script:xHoverIdx) { [System.Drawing.Color]::FromArgb(220,70,70) } elseif ($i -eq $hr) { [System.Drawing.Color]::FromArgb(150,150,155) } else { [System.Drawing.Color]::FromArgb(216,216,220) })
     }
+  }
   }
 
   if (($now - $script:startAt).TotalSeconds -ge 6 -and ($now - $script:lastClaude).TotalSeconds -ge 2) {
