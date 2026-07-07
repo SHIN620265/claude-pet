@@ -704,7 +704,7 @@ if ($script:layered) {
       return
     }
     $dx = $e.X - $chips.pen.cx; $dy = $e.Y - $chips.pen.cy
-    if (($dx*$dx + $dy*$dy) -le ($chips.pen.r * $chips.pen.r)) { return }   # pencil -> rename (S4, deferred)
+    if (($dx*$dx + $dy*$dy) -le ($chips.pen.r * $chips.pen.r)) { Edit-Row-Layered $ri; return }   # pencil -> inline rename
     Jump-Row $ri
   })
 }
@@ -852,6 +852,50 @@ $editBox.add_KeyDown({ param($snd, $e)
 })
 $editBox.add_LostFocus({ if ($script:editing) { Commit-Edit } })
 
+# card-layering knife: the child controls above are invisible under the ULW bitmap but STILL
+# receive mouse input, which would intercept clicks before the form-level MouseClick + NCHITTEST
+# hit-test. Detach them so the layered card routes every click to the form handler (the objects
+# survive for the never-executed non-layered branches; the layered path uses only the bitmap).
+if ($script:layered) { $card.Controls.Clear() }
+
+# card-layering knife (S4): the layered card can't host a child TextBox (the ULW bitmap covers
+# everything), so inline rename uses a SEPARATE activatable top-level window over the title. NOT
+# NOACTIVATE -- it must grab the keyboard. Commit on Enter or lost activation; Esc cancels. The
+# editing flag (shared with the Region path) freezes Update-Card so the row stays put while editing.
+if ($script:layered) {
+  $script:editWin = New-Object System.Windows.Forms.Form
+  $script:editWin.FormBorderStyle = 'None'; $script:editWin.ShowInTaskbar = $false; $script:editWin.TopMost = $true; $script:editWin.StartPosition = 'Manual'
+  $script:editTb = New-Object System.Windows.Forms.TextBox
+  $script:editTb.BorderStyle = 'FixedSingle'; $script:editTb.Dock = 'Fill'
+  $script:editTb.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
+  $script:editTb.BackColor = [System.Drawing.Color]::White; $script:editTb.ForeColor = [System.Drawing.Color]::FromArgb(45, 45, 50)
+  $script:editWin.Controls.Add($script:editTb)
+  $script:editTb.add_KeyDown({ param($snd, $e)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Return) { $e.SuppressKeyPress = $true; Commit-EditL }
+    elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $e.SuppressKeyPress = $true; Cancel-EditL }
+  })
+  $script:editWin.add_Deactivate({ if ($script:editing) { Commit-EditL } })   # click away -> commit
+}
+function Edit-Row-Layered($idx) {
+  $sid = $script:rowSids[$idx]; if (-not $sid) { return }
+  $gm = $script:cardGeom; if (-not $gm) { return }
+  $cur = ''; $c = RU (Join-Path $sessDir $sid); if ($c) { $cur = ($c -split "`t")[2] }
+  $ry = $gm.pad + $idx * ($gm.rowH + $gm.rowGap)
+  $script:editSid = $sid; $script:editing = $true; $script:editStart = Get-Date
+  $script:editWin.SetBounds(($script:cardPosX + $gm.pad + $gm.m), ($script:cardPosY + $ry + [int](6 * $gm.scale)), ($gm.cardW - 2*$gm.m - [int](38*$gm.scale)), [int](22 * $gm.scale))
+  $script:editTb.Text = $cur
+  $script:editWin.Show(); [Lp]::Activate($script:editWin.Handle); $script:editTb.Focus(); $script:editTb.SelectAll()
+}
+function Commit-EditL {
+  if (-not $script:editing) { return }
+  $script:editing = $false
+  $t = ($script:editTb.Text + '').Trim(); $script:editWin.Hide()
+  if ($t -and $script:editSid) { Set-Title $script:editSid $t; $script:lastSig = '__' }
+}
+function Cancel-EditL {
+  $script:editing = $false; $script:editWin.Hide()
+}
+
 $stateColors = @{
   thinking  = [System.Drawing.Color]::FromArgb(60,130,210)
   attention = [System.Drawing.Color]::FromArgb(225,150,40)
@@ -899,8 +943,10 @@ function Place-Card {
   if (($cy + $script:cardH) -gt ($wa.Bottom - 4)) { $cy = $script:y - $script:cardH - $gap }
   if ($script:layered) {
     # the layered window is bigger than the card content by the shadow pad on every side;
-    # store the screen origin so the frame push (UpdateLayeredWindow) positions it there
+    # store the screen origin for the frame push (UpdateLayeredWindow) AND sync $card.Location
+    # so WinForms' client-coordinate translation (MouseClick $e.X/$e.Y) matches the real position
     $p = [int](14 * $scale); $script:cardPosX = $cx - $p; $script:cardPosY = $cy - $p
+    if ($card.Left -ne $script:cardPosX -or $card.Top -ne $script:cardPosY) { $card.Location = New-Object System.Drawing.Point($script:cardPosX, $script:cardPosY) }
   } elseif ($card.Left -ne $cx -or $card.Top -ne $cy) { $card.Left = $cx; $card.Top = $cy }
 }
 function Update-Card {
