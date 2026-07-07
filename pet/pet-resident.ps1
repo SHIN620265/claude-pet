@@ -50,6 +50,55 @@ public static class Lp {
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     public static bool IsWin(IntPtr h){ try { return IsWindow(h); } catch { return false; } }
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder sb, int max);
+    public static string ClassName(IntPtr h){ try { System.Text.StringBuilder sb = new System.Text.StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); } catch { return ""; } }
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+    delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int m);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+    // Among visible titled top-level windows owned by a process with the SAME name as
+    // `fallback`'s owner, pick the one whose title best matches `cwdPath` (the deepest cwd
+    // path component appearing in a title wins). Returns `fallback` unchanged when there are
+    // fewer than two such windows, or no unambiguous match -- so single-window and non-editor
+    // hosts are never disturbed. Defeats the Electron multi-window trap: every VS Code window
+    // shares one Code.exe, so MainWindowHandle only ever exposes one (often wrong) handle.
+    public static IntPtr PickWindowForPath(string cwdPath, IntPtr fallback) {
+        try {
+            if (fallback == IntPtr.Zero || string.IsNullOrEmpty(cwdPath)) return fallback;
+            uint fp; GetWindowThreadProcessId(fallback, out fp);
+            string procName;
+            try { procName = System.Diagnostics.Process.GetProcessById((int)fp).ProcessName; } catch { return fallback; }
+            System.Collections.Generic.HashSet<int> pidset = new System.Collections.Generic.HashSet<int>();
+            foreach (System.Diagnostics.Process pr in System.Diagnostics.Process.GetProcessesByName(procName)) pidset.Add(pr.Id);
+            System.Collections.Generic.List<IntPtr> wins = new System.Collections.Generic.List<IntPtr>();
+            System.Collections.Generic.List<string> titles = new System.Collections.Generic.List<string>();
+            EnumWindows((h, l) => {
+                if (!IsWindowVisible(h)) return true;
+                if (GetWindowTextLength(h) == 0) return true;
+                uint wp; GetWindowThreadProcessId(h, out wp);
+                if (!pidset.Contains((int)wp)) return true;
+                System.Text.StringBuilder sb = new System.Text.StringBuilder(400); GetWindowText(h, sb, 400);
+                wins.Add(h); titles.Add(sb.ToString());
+                return true;
+            }, IntPtr.Zero);
+            if (wins.Count < 2) return fallback;
+            string[] parts = cwdPath.Split(new char[]{'\\','/'}, StringSplitOptions.RemoveEmptyEntries);
+            int bestIdx = -1, bestScore = 0, bestCount = 0;
+            for (int i = 0; i < wins.Count; i++) {
+                int score = 0;
+                for (int d = 0; d < parts.Length; d++) {
+                    if (parts[d].Length >= 2 && titles[i].IndexOf(parts[d], StringComparison.OrdinalIgnoreCase) >= 0) {
+                        if (d + 1 > score) score = d + 1;
+                    }
+                }
+                if (score > bestScore) { bestScore = score; bestIdx = i; bestCount = 1; }
+                else if (score == bestScore && score > 0) { bestCount++; }
+            }
+            if (bestScore == 0 || bestCount != 1) return fallback;
+            return wins[bestIdx];
+        } catch { return fallback; }
+    }
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint f);
     // true only if the TOPMOST window under (x,y) belongs to `top`. A purely geometric
@@ -139,6 +188,12 @@ function RU($p){ if (Test-Path $p) { try { return [IO.File]::ReadAllText($p, [Te
 function WU($p, $s){ [IO.File]::WriteAllText($p, $s, (New-Object Text.UTF8Encoding($false))) }
 $nowMs = { [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
+# WT tab-level jump (knife 2): the UIA calls live in a compiled helper. Load it lazily; if
+# the two UIAutomation GAC assemblies are somehow unavailable the whole tab feature just
+# no-ops and jumps stay window-level -- exactly the pre-1.4 behavior.
+$script:wtJump = $false
+try { Add-Type -Path (Join-Path $code 'JumpWt.cs') -ReferencedAssemblies UIAutomationClient, UIAutomationTypes; $script:wtJump = $true } catch {}
+
 # soft synthesized chimes (done = warm ascending; attn = higher quick double)
 $script:sndDone = $null; $script:sndAttn = $null
 $donePath = Join-Path $root 'done.wav'; $attnPath = Join-Path $root 'attn.wav'
@@ -202,6 +257,27 @@ function LogEv($msg) {
   if ((Test-Path $log) -and ((Get-Item $log).Length -gt 262144)) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
   try { Add-Content $log -Value ('{0}  {1}' -f (Get-Date -Format 'MM-dd HH:mm:ss'), $msg) -Encoding UTF8 } catch {}
 }
+# ---- interrupt watch: Esc-interrupting a turn fires no Stop hook (feature request
+# #9516), so a thinking card would hang forever. The interrupt leaves a durable mark as
+# the FINAL transcript entry -- a user message carrying "interruptedMessageId". Tail the
+# transcript; report interrupted only when that mark is the last entry, so a new prompt or
+# reply landing afterwards clears it and we never re-trigger on a stale interrupt.
+# Shared read (Claude keeps the write handle).
+function Test-Interrupted($tp) {
+  if (-not $tp -or -not (Test-Path $tp)) { return $false }
+  $text = ''
+  try {
+    $fs = [IO.File]::Open($tp, 'Open', 'Read', 'ReadWrite')
+    $flen = $fs.Length; $take = [Math]::Min($flen, 65536)
+    if ($take -le 0) { $fs.Dispose(); return $false }
+    [void]$fs.Seek(-$take, 'End')
+    $buf = New-Object byte[] $take; [void]$fs.Read($buf, 0, $take); $fs.Dispose()
+    $text = [Text.Encoding]::UTF8.GetString($buf)
+  } catch { return $false }
+  $last = ''
+  foreach ($ln in ($text -split "`n")) { $t = $ln.Trim(); if ($t) { $last = $t } }
+  return ($last -match '"interruptedMessageId"')
+}
 # Walk up the parent chain from a claude.exe PID to the first ancestor owning a real
 # top-level window (Windows Terminal, VS Code, a plain console, ...). Each ancestor must
 # be born no later than its child (2s slack): a recycled parent PID would otherwise point
@@ -262,11 +338,56 @@ function Write-JumpRequest([int]$cpid) {
     return 1
   } catch { return 0 }
 }
+# After a successful WINDOW-level activation, place the Windows Terminal host on the exact
+# tab. Direct path: if this session's LIVE state is stable (done/idle/attention, no armed
+# .pending) its recorded fingerprint still equals the tab Name -> select it. Otherwise
+# (mid-turn, so the title is about to change; or a zero/multi-Name match) fall to the nonce
+# channel. Any failure keeps the window-level jump -- tab precision is a bonus, never a
+# regression, so we never head-shake here. Returns for events.log:
+#   '1' selected directly   '0' handed to the (async) nonce channel or a direct miss
+#   '-' not a WT host (VS Code went through the jump-req companion handshake instead)
+function Jump-Tab($h, $cp, $sid) {
+  if (-not $script:wtJump) { return '-' }
+  $cls = ''; try { $cls = [Lp]::ClassName($h) } catch {}
+  if ($cls -ne 'CASCADIA_HOSTING_WINDOW_CLASS') { return '-' }
+  # direct-connect eligibility (design F1/G1): re-read the session file NOW for the live
+  # state + fingerprint. The render row cache lags the tick/FSW by up to ~1.2s, and an
+  # armed .pending means the title is about to flip -- neither is safe to match directly.
+  $st = ''; $fp = ''
+  $c = RU (Join-Path $sessDir $sid)
+  if ($c) { $pp = $c -split "`t"; $st = $pp[0]; if ($pp.Count -ge 8) { $fp = $pp[7] } }
+  $armed = Test-Path (Join-Path $sessDir "$sid.pending")
+  if (($st -eq 'done' -or $st -eq 'idle' -or $st -eq 'attention') -and -not $armed -and $fp) {
+    $r = 0; try { $r = [PetWtJump]::TryFocusTab($h, $fp) } catch { $r = 0 }
+    if ($r -eq 1) { return '1' }
+  }
+  Start-NonceJump $h $cp
+  return '0'
+}
+# nonce channel: a short-lived helper stamps a unique title on THIS session's tab (by
+# attaching to its console) so the resident can pick it out of same-named siblings, then
+# the tick poller selects it and the helper restores. Per-hwnd single slot (last-click-
+# wins) plus a per-shell cooldown longer than the helper's life keep stamp/restore from
+# racing. Timing invariant (design G2): holdMs < deadline < cooldown.
+function Start-NonceJump($h, $cp) {
+  if ($env:PET_DISABLE_NONCE -eq '1') { return }   # test switch (T38): prove an honest give-up
+  $now = Get-Date
+  if ($script:nonceCooldown.ContainsKey($cp) -and $now -lt $script:nonceCooldown[$cp]) { return }
+  $nonce = 'PETNONCE_' + [Guid]::NewGuid().ToString('N')
+  $holdMs = 2000
+  try {
+    Start-Process pwsh -WindowStyle Hidden -ArgumentList @(
+      '-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $code 'jump-nonce.ps1'), "$cp", $nonce, "$holdMs"
+    ) | Out-Null
+  } catch { return }
+  $script:nonceInFlight[$h.ToInt64()] = @{ nonce = $nonce; shellPid = $cp; deadline = $now.AddMilliseconds(3400) }
+  $script:nonceCooldown[$cp] = $now.AddMilliseconds(4400)
+}
 function Jump-Row($idx) {
   if ($script:editing) { return }
   $sid = $script:rowSids[$idx]; if (-not $sid) { return }
   $cp = 0; [void][int]::TryParse(($script:rowPids[$idx] + ''), [ref]$cp)
-  $ok = $false; $hv = 0; $hit = 0; $rq = 0
+  $ok = $false; $hv = 0; $hit = 0; $rq = 0; $wtab = '-'
   if ($cp -gt 0) {
     $gp0 = Get-Process -Id $cp -ErrorAction SilentlyContinue
     if ($gp0 -and $gp0.ProcessName -eq 'claude') {   # PID recycled by a non-claude process -> never jump
@@ -277,14 +398,21 @@ function Jump-Row($idx) {
       }
       if ($h -eq [IntPtr]::Zero) { $h = Find-HostWindow $cp; $script:jumpCache[$cp] = $h }   # Zero is cached too (stops futile re-warming); a later click re-walks
       if ($h -ne [IntPtr]::Zero) {
+        # multi-window VS Code: all windows share one Code.exe so MainWindowHandle can't
+        # tell them apart -> re-pick the window whose title matches this session's workspace
+        # (field 10 = cwd). No-op for single-window / non-editor hosts. Applied per click
+        # (not cached) so it always targets the right window as the window set changes.
+        $jcwd = ''; $jsc = RU (Join-Path $sessDir $sid); if ($jsc) { $jsp = $jsc -split "`t"; if ($jsp.Count -ge 10) { $jcwd = $jsp[9] } }
+        if ($jcwd) { $h = [Lp]::PickWindowForPath($jcwd, $h) }
         $hv = $h.ToInt64(); $ok = [Lp]::Activate($h)
         if (-not $ok) { $script:jumpCache[$cp] = [IntPtr]::Zero }   # stale target -> drop so the next click re-resolves
-        if ($ok) { $rq = Write-JumpRequest $cp }   # tab-level handshake rides on a successful window jump only
+        if ($ok) { $rq = Write-JumpRequest $cp; $wtab = Jump-Tab $h $cp $sid }   # tab-level jump rides on a successful window jump only
       }
     }
   }
+  if ($ok) { $script:selectedSid = $sid }   # mark this card selected: it stays lit until you pick another
   if (-not $ok) { $script:shakeN = 6 }   # honest feedback: cannot place this session
-  LogEv ('jump idx={0} pid={1} hwnd={2} ok={3} cache={4} req={5}' -f $idx, $cp, $hv, [int]$ok, $hit, $rq)
+  LogEv ('jump idx={0} pid={1} hwnd={2} ok={3} cache={4} req={5} wtab={6}' -f $idx, $cp, $hv, [int]$ok, $hit, $rq, $wtab)
 }
 
 $g0 = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $g0.DpiX / 96.0; $g0.Dispose()
@@ -418,7 +546,7 @@ for ($i = 0; $i -lt $MAXROWS; $i++) {
   # industry analogue here is the focus ring / selected outline, not a list-row tint:
   # a 2px ring in the mascot's coral marks the hovered card unmistakably on any backdrop
   $pnl.add_Paint({ param($snd,$e)
-    if ([int]$snd.Tag -ne $script:hoverRow) { return }
+    if ([int]$snd.Tag -ne $script:hoverRow -and [int]$snd.Tag -ne $script:selRow) { return }   # ring shows on hover OR persistent selection
     $rc2 = [int](14 * $scale)
     $pw = [Math]::Max(2, [int][math]::Round(2 * $scale))
     $half = [int][math]::Ceiling($pw / 2.0)
@@ -542,10 +670,14 @@ $script:lastPoll = $now0; $script:lastSpin = $now0; $script:spinIdx = 0; $script
 $script:animOn = $true; try { $script:animOn = [Lp]::AnimationsOn() } catch {}; $script:lastAnimChk = $now0
 $script:lastTop = $now0
 $script:cardShown = $false; $script:cardH = $rowH; $script:lastSig = '__'; $script:hoverRow = -2; $script:xHoverIdx = -1
+$script:selRow = -2; $script:selectedSid = ''   # the last-clicked card stays lit (selection tracked by sid, follows re-sorts)
 $script:lastKeys = @{}; $script:rowKeys = New-Object 'string[]' $MAXROWS; $script:rowSids = New-Object 'string[]' $MAXROWS; $script:firstPoll = $true
 $script:rowPids = New-Object 'string[]' $MAXROWS; $script:shakeN = 0
 $script:jumpCache = @{}; $script:lastWarm = $now0   # claudePid -> host HWND (pre-warmed so the first click is instant)
 $script:jumpChain = @{}   # claudePid -> ancestor PID chain from that walk (consumed by the VS Code companion handshake)
+$script:nonceInFlight = @{}   # hwnd(int64) -> @{ nonce; shellPid; deadline } (per-hwnd single slot, last-click-wins)
+$script:nonceCooldown = @{}   # shellPid -> cooldown-until DateTime (> helper life so a shell is not re-poked mid-flight)
+$script:lastNoncePoll = $now0; $script:lastIntr = $now0
 $script:fsDirty = $false
 $script:editing = $false; $script:editSid = ''
 $spinChars = @(0x280B,0x2819,0x2839,0x2838,0x283C,0x2834,0x2826,0x2827,0x2807,0x280F) | ForEach-Object { [char]$_ }
@@ -756,15 +888,20 @@ $tick.add_Tick({
       if ($ri2 -lt $MAXROWS -and ($rel - $ri2 * $pitch) -lt $rowH) { $hr = $ri2 }   # cursor in a gap counts as nowhere
     }
   }
-  if ($hr -ne $script:hoverRow) {
-    $script:hoverRow = $hr
+  # which row (if any) is the persistently-selected card -- tracked by sid so it follows
+  # re-sorts and re-indexing; recomputed every tick from the live row->sid mapping
+  $sr = -1
+  if ($script:selectedSid) { for ($si = 0; $si -lt $MAXROWS; $si++) { if ($script:rowSids[$si] -eq $script:selectedSid) { $sr = $si; break } } }
+  if ($hr -ne $script:hoverRow -or $sr -ne $script:selRow) {
+    $script:hoverRow = $hr; $script:selRow = $sr
     for ($i = 0; $i -lt $MAXROWS; $i++) {
-      # two-level hover: the hovered card shifts HUE (light apricot, matching its coral
-      # ring) rather than lightness -- cream->white is a ~2% delta nobody can see, and
-      # hue is the second-most-sensitive visual channel after edges; icons get their
-      # own hover backplates on top
-      $rowPanel[$i].BackColor = $(if ($i -eq $hr) { [System.Drawing.Color]::FromArgb(254,240,233) } else { [System.Drawing.Color]::FromArgb(250,249,245) })
-      $rowPanel[$i].Invalidate()   # repaint the hover border (appears/disappears with $hr)
+      # a card lights (apricot fill + coral ring) when hovered OR selected. Hue shift (not
+      # lightness) because cream->white is a ~2% delta nobody sees, and hue is the second-
+      # most-sensitive channel after edges. The edit/close action icons brighten on HOVER
+      # only, so a merely-selected card is lit without action-affordance clutter.
+      $lit = ($i -eq $hr -or $i -eq $sr)
+      $rowPanel[$i].BackColor = $(if ($lit) { [System.Drawing.Color]::FromArgb(254,240,233) } else { [System.Drawing.Color]::FromArgb(250,249,245) })
+      $rowPanel[$i].Invalidate()   # repaint the ring (appears/disappears with hover or selection)
       $rowEdit[$i].ForeColor = $(if ($i -eq $hr) { [System.Drawing.Color]::FromArgb(95,95,105) } else { [System.Drawing.Color]::FromArgb(216,216,220) })
       $rowClose[$i].ForeColor = $(if ($i -eq $script:xHoverIdx) { [System.Drawing.Color]::FromArgb(220,70,70) } elseif ($i -eq $hr) { [System.Drawing.Color]::FromArgb(150,150,155) } else { [System.Drawing.Color]::FromArgb(216,216,220) })
     }
@@ -811,9 +948,53 @@ $tick.add_Tick({
       }
     }
   }
+  # interrupt watch: flip a hung 'thinking' card to idle when its transcript shows an
+  # Esc-interrupt as the latest entry (interrupts fire no Stop hook). Slow cadence; only
+  # thinking cards pay the tail read. 'busy' events also write the 'thinking' key, so this
+  # covers both.
+  if (($now - $script:lastIntr).TotalMilliseconds -ge 700) {
+    $script:lastIntr = $now
+    for ($i = 0; $i -lt $MAXROWS; $i++) {
+      if ($script:rowKeys[$i] -ne 'thinking') { continue }
+      $sid = $script:rowSids[$i]; if (-not $sid) { continue }
+      $sess = Join-Path $sessDir $sid
+      $c = RU $sess; if (-not $c) { continue }
+      $p = $c -split "`t"
+      if ($p[0] -ne 'thinking') { continue }   # re-read: the row cache can lag a real state change
+      $tpI = ''; if ($p.Count -ge 9) { $tpI = $p[8] }
+      if (-not $tpI) { continue }
+      if (Test-Interrupted $tpI) {
+        while ($p.Count -lt 9) { $p += '' }
+        $p[0] = 'idle'; $p[1] = L 'idle' 'idle'; $p[4] = "$(& $nowMs)"
+        WU $sess ($p -join "`t")
+        $script:fsDirty = $true
+        LogEv ('interrupt->idle sid={0}' -f $sid)
+      }
+    }
+  }
+  # nonce channel poller (knife 2): drive the async tab-select without blocking the UI
+  # thread. For each in-flight window scan once for its nonce tab; a hit selects it (in the
+  # .cs) and clears the slot; past the deadline give up (the window-level jump already
+  # landed) and clear. Only runs while a nonce is in flight.
+  if ($script:nonceInFlight.Count -gt 0 -and ($now - $script:lastNoncePoll).TotalMilliseconds -ge 180) {
+    $script:lastNoncePoll = $now
+    foreach ($hk in @($script:nonceInFlight.Keys)) {
+      $e = $script:nonceInFlight[$hk]
+      $h = [IntPtr]$hk
+      if (-not [Lp]::IsWin($h)) { $script:nonceInFlight.Remove($hk); continue }
+      $r = 0; try { $r = [PetWtJump]::TryFocusNonce($h, $e.nonce) } catch { $r = 0 }
+      if ($r -eq 1) {
+        $script:nonceInFlight.Remove($hk)
+        LogEv ('wtab nonce hit hwnd={0} shell={1} scan={2}ms' -f $hk, $e.shellPid, [PetWtJump]::LastScanMs)
+      } elseif ($now -ge $e.deadline) {
+        $script:nonceInFlight.Remove($hk)
+        LogEv ('wtab nonce miss hwnd={0} shell={1}' -f $hk, $e.shellPid)
+      }
+    }
+  }
 })
 
-$form.add_Shown({ Render 'idle'; Update-Card; $tick.Start() })
+$form.add_Shown({ LogEv ('resident up wtJump=' + [int]$script:wtJump); Render 'idle'; Update-Card; $tick.Start() })
 [System.Windows.Forms.Application]::Run($form)
 foreach ($f in $script:frames.Values) { $f.Dispose() }
 try { $fsw.EnableRaisingEvents = $false; $fsw.Dispose() } catch {}

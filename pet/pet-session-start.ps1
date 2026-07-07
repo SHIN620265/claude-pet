@@ -39,12 +39,48 @@ $cpid = 0
 try { $cpid = [int](Get-Process -Id $PID -ErrorAction Stop).Parent.Id } catch {}
 if ($cpid -le 0) { try { $cpid = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId } catch {} }
 
+# session record field 8 = WT tab fingerprint (this session's console/tab title, for
+# tab-level jump), field 9 = transcript path (interrupt detection). Both best-effort at
+# SessionStart and self-heal on the next real event; see pet-event.ps1 for the rationale.
+$tp = ''; if ($j) { $tp = [string]$j.transcript_path }
+function CleanRec($s) {
+  if (-not $s) { return '' }
+  $s = [string]$s -replace '[\x00-\x1F\x7F]', ' '
+  if ($s.Length -gt 200) { $s = $s.Substring(0, 200) }
+  return $s
+}
+function Get-HostTitle {
+  $t = ''; try { $t = [string][Console]::Title } catch {}
+  if ($t) { return $t }
+  if ($cpid -le 0) { return '' }
+  try {
+    if (-not ('PetCon.K' -as [type])) {
+      Add-Type -Namespace PetCon -Name K -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode)] public static extern int GetConsoleTitle(System.Text.StringBuilder sb, int n);
+'@
+    }
+    [void][PetCon.K]::FreeConsole()
+    if ([PetCon.K]::AttachConsole([uint32]$cpid)) {
+      $sb = New-Object System.Text.StringBuilder 512
+      [void][PetCon.K]::GetConsoleTitle($sb, 512)
+      $t = $sb.ToString()
+    }
+    [void][PetCon.K]::FreeConsole()
+  } catch {}
+  return $t
+}
+$fp = CleanRec (Get-HostTitle)
+$tpF = CleanRec $tp
+$cwdF = CleanRec $cwd   # field 10: workspace hint for VS Code multi-window jump
+
 # Register this window's card WITHOUT clobbering an ongoing session's real title/state.
 #   clear   -> conversation reset: fresh idle card + drop the rename lock
 #   new sid -> idle placeholder card
 #   resume / compact / re-register of an existing session -> leave its card untouched
 $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-$idleRec = (('idle', '空闲', $projOr, '', "$epoch", '', "$cpid") -join "`t")
+$idleRec = (('idle', '空闲', $projOr, '', "$epoch", '', "$cpid", $fp, $tpF, $cwdF) -join "`t")
 if ($src -eq 'clear') {
   Remove-Item "$file.titlelock", "$file.pending" -Force -ErrorAction SilentlyContinue
   [IO.File]::WriteAllText($file, $idleRec, (New-Object Text.UTF8Encoding($false)))
@@ -53,13 +89,19 @@ if ($src -eq 'clear') {
 } elseif ($cpid -gt 0) {
   # resume / compact / re-register: the card itself stays untouched (title, state and
   # epoch are the session's memory -- see MAINTAINERS pitfall 8), but the claude PID
-  # (field 7) must follow the session into its new claude.exe, and this also back-fills
-  # records written before the field existed
+  # (field 7) must follow the session into its new claude.exe; field 8 (tab fingerprint)
+  # and field 9 (transcript path) are refreshed too so tab-jump and the interrupt watch
+  # track the resumed window. This also back-fills records written before these fields.
   try {
     $c = [IO.File]::ReadAllText($file, [Text.Encoding]::UTF8)
     if ($c) {
-      $p = $c -split "`t"; while ($p.Count -lt 7) { $p += '' }
-      if ($p[6] -ne "$cpid") { $p[6] = "$cpid"; [IO.File]::WriteAllText($file, ($p -join "`t"), (New-Object Text.UTF8Encoding($false))) }
+      $p = $c -split "`t"; while ($p.Count -lt 10) { $p += '' }
+      $dirty = $false
+      if ($p[6] -ne "$cpid") { $p[6] = "$cpid"; $dirty = $true }
+      if ($fp -and $p[7] -ne $fp) { $p[7] = $fp; $dirty = $true }      # never wipe a good fingerprint with an empty read
+      if ($tpF -and $p[8] -ne $tpF) { $p[8] = $tpF; $dirty = $true }
+      if ($cwdF -and $p[9] -ne $cwdF) { $p[9] = $cwdF; $dirty = $true }
+      if ($dirty) { [IO.File]::WriteAllText($file, ($p -join "`t"), (New-Object Text.UTF8Encoding($false))) }
     }
   } catch {}
 }

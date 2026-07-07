@@ -35,6 +35,45 @@ function ExistingTitle { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Co
 function ExistingDetail { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 4) { return $p[3] } } return '' }
 function ExistingModel { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 6) { return $p[5] } } return '' }
 function ExistingPid { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 7) { return $p[6] } } return '' }
+function ExistingFp  { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 8) { return $p[7] } } return '' }
+function ExistingTp  { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 9) { return $p[8] } } return '' }
+function ExistingCwd { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 10) { return $p[9] } } return '' }
+
+# scrub every control char (incl. TAB/CR/LF/ESC/BEL) so a value can never corrupt the
+# single-line TAB-separated record; cap length so a pathological title can't bloat it
+function CleanRec($s) {
+  if (-not $s) { return '' }
+  $s = [string]$s -replace '[\x00-\x1F\x7F]', ' '
+  if ($s.Length -gt 200) { $s = $s.Substring(0, 200) }
+  return $s
+}
+# This session's WT tab Name == its console title. Hooks run as children of claude.exe
+# and share its console, so [Console]::Title reads the tab title directly -- no P/Invoke,
+# no Add-Type, the common path. Fallback for a hook spawned without an inherited console:
+# attach to claude's console explicitly (kernel32 lazily compiled so the fast path never
+# pays the ~400ms). Best-effort: an empty result just keeps the previous fingerprint.
+function Get-HostTitle {
+  $t = ''; try { $t = [string][Console]::Title } catch {}
+  if ($t) { return $t }
+  if ($cpid -le 0) { return '' }
+  try {
+    if (-not ('PetCon.K' -as [type])) {
+      Add-Type -Namespace PetCon -Name K -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode)] public static extern int GetConsoleTitle(System.Text.StringBuilder sb, int n);
+'@
+    }
+    [void][PetCon.K]::FreeConsole()
+    if ([PetCon.K]::AttachConsole([uint32]$cpid)) {
+      $sb = New-Object System.Text.StringBuilder 512
+      [void][PetCon.K]::GetConsoleTitle($sb, 512)
+      $t = $sb.ToString()
+    }
+    [void][PetCon.K]::FreeConsole()
+  } catch {}
+  return $t
+}
 
 # model shown on the card = the model of this session's LAST reply, parsed from the
 # transcript tail. Honest per-session semantics: never claims "current model" (hooks
@@ -105,8 +144,17 @@ if (-not $mdl) { $mdl = ExistingModel }   # events without transcript_path keep 
 function WriteSession($key, $label, $title, $detail, $model) {
   if (-not $model) { $model = $mdl }
   $cp = "$cpid"; if ($cpid -le 0) { $cp = ExistingPid }   # one flaky capture must not wipe a good pid
+  # field 8 = WT tab fingerprint (this session's console/tab title, for tab-level jump);
+  # a flaky/empty read keeps the old value so it is never wiped
+  $fp = CleanRec (Get-HostTitle); if (-not $fp) { $fp = ExistingFp }
+  # field 9 = transcript path (the resident tails it to catch Esc-interrupts, which fire
+  # no Stop hook); events without a transcript_path keep the old value
+  $tpF = CleanRec $tp; if (-not $tpF) { $tpF = ExistingTp }
+  # field 10 = this session's cwd (workspace hint: disambiguates which VS Code window to
+  # jump to, since all windows share one Code.exe and MainWindowHandle can't tell them apart)
+  $cwdF = CleanRec $cwd; if (-not $cwdF) { $cwdF = ExistingCwd }
   $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-  $rec = ($key, $label, $title, $detail, "$epoch", $model, $cp) -join "`t"
+  $rec = ($key, $label, $title, $detail, "$epoch", $model, $cp, $fp, $tpF, $cwdF) -join "`t"
   [IO.File]::WriteAllText($file, $rec, (New-Object Text.UTF8Encoding($false)))
 }
 $projOr = $proj   # may be empty; the resident localizes an empty title to "new session"
