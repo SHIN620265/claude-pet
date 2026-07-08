@@ -233,10 +233,10 @@ $nowMs = { [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) }
 
 # ---- card-layering knife (S1+): render the card stack to a straight-alpha ARGB bitmap for a
 # per-pixel-alpha layered window (smooth AA corners + soft shadow, replacing the aliased Region).
-# Gated by PET_CARD_LAYERED (default off); these functions are INERT until the layered window is
-# wired, so the live pet is untouched. Layers: cached shadow + cached static (rebuilt on content/
-# hover/selection change) composited with a per-frame spinner glyph (D5/D6/D8/D9).
-$script:layered = ($env:PET_CARD_LAYERED -eq '1') -or (Test-Path (Join-Path $root 'card-layered.flag'))   # opt-in dogfood pin (survives session restarts; delete the flag to revert to the Region card)
+# DEFAULT since v1.4.0. Layers: cached shadow + cached static (rebuilt on content/hover/selection
+# change) composited with a per-frame spinner glyph (D5/D6/D8/D9). Verified perf-neutral vs the
+# Region card (no GDI leak over sustained spinner, ~same CPU) and DPI-correct at 100/125/150%.
+$script:layered = -not (($env:PET_CARD_REGION -eq '1') -or (Test-Path (Join-Path $root 'card-region.flag')))   # layered is the default; opt OUT to the legacy Region card via PET_CARD_REGION=1 or a card-region.flag escape hatch
 $script:cardCache = $null; $script:cardList = @(); $script:cardGeom = $null   # layered-card render state
 $script:cardPosX = 0; $script:cardPosY = 0; $script:cardDirty = $false; $script:hoverIcon = 0
 function Get-RoundPath($x, $y, $w, $h, $r) {
@@ -642,9 +642,9 @@ Update-LangChecks
 $script:lastLang = ((RU (Join-Path $root 'lang.txt')) + '').Trim()
 
 # ---- multi-row card ----
-# card-layering knife: when PET_CARD_LAYERED, the card is a per-pixel-alpha layered window
+# card-layering knife: by default the card is a per-pixel-alpha layered window
 # (PetWin's exstyle = LAYERED+TOPMOST+TOOLWINDOW+NOACTIVATE) rendered to a bitmap; the child
-# controls below are still created but stay inert/invisible under the layered surface (S1 read-only).
+# controls below are built for the legacy Region path and cleared in layered mode (see ~L817).
 $card = if ($script:layered) { New-Object LCardWin } else { New-Object CardWin }
 $card.FormBorderStyle = 'None'; $card.ShowInTaskbar = $false; $card.TopMost = $true; $card.StartPosition = 'Manual'
 if ($script:layered) {

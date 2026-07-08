@@ -14,7 +14,7 @@
 **开发工具**(仓库根 `tools/`,**不随插件发布**——marketplace `source:"./pet"` 只收 `pet/`;这些写入/校验 `pet/` 但自身不在其中):`pet-sounds.ps1`(生成 `done.wav`/`attn.wav`)、`claude-draw.ps1`(生成 `claude-idle/blink/happy.png`)、`guard-wt-tab-removed.ps1`(WT 删刀回归守卫 G1-G7,`pwsh tools/guard-wt-tab-removed.ps1`)。
 
 **运行时文件**(均在 `~/.claude/pet-data`):`lang.txt`(`auto/zh/en/ja`)、`sound.txt`(`on/off`)、
-`privacy.txt`(`on/off`;隐私模式:卡片正文打码为 cwd 项目名、详情清空)、`card-layered.flag`(dogfood 开关:平滑分层卡)、
+`privacy.txt`(`on/off`;隐私模式:卡片正文打码为 cwd 项目名、详情清空)、`card-region.flag`(逃生阀:存在则强制回退旧 Region 卡;平滑分层卡自 v1.4.0 默认开,等价 env `PET_CARD_REGION=1`)、
 `pet-state.txt`(开关记忆)、`pet-pos.txt`(位置)、`pet.pid`、`events.log`(调试,超 256KB 自动重建)、
 `sessions\<id>`(+`.dismiss` 关闭标记、`.titlelock` 改名锁定、`.pending` 认命令布防:
 `claudePid<TAB>armEpochMillis<TAB>归一化命令片段`,permreq 布防、其余事件拆防、常驻消费)、
@@ -88,7 +88,7 @@
   events.log 的 `req=` 标志)。扩展源码在仓库顶层 `vscode-ext/claude-pet-jump/`(插件 payload 之外,纯 JS
   单文件零依赖);本地安装=整目录拷入 `~\.vscode\extensions\shin620265.claude-pet-jump-0.1.0` 后 Reload
   Window(T35/T36)。
-- **分卡视觉+整行 hover(1.2.0,与跳窗同刀)**:每会话一个 Panel 容器(整行含空白皆是跳转命中区),窗体 Region=
+- **分卡视觉+整行 hover(Region 卡,1.2.0)**——**⚠ v1.4.0 起平滑分层卡默认开,Region 卡降为 opt-out 兜底(`card-region.flag`/`PET_CARD_REGION=1`);以下描述遗留 Region 路径,分层卡机制见下方 card-layering 节**:每会话一个 Panel 容器(整行含空白皆是跳转命中区),窗体 Region=
   各行圆角矩形**并集**(行距 7px 缝隙从窗口裁掉,视觉即通知中心式独立卡,缝隙点击穿透);hover 采用**两级层级**
   区分行点击与行内图标(业界列表模式):整行**提亮为纯白**(底色是暖米白 250,249,245,白=变亮;压暗版被用户
   否掉)=「这张卡是一个大按钮」,✎/× 悬停各自出**底色背板**(✎ 灰块、× 浅红块+红字;8pt 小图标光换字色不可辨,
