@@ -1,7 +1,8 @@
 # Hook -> pet per-session state bridge (run under pwsh, UTF-8 safe).
-# Each Claude Code session (session_id) gets its own file under sessions\<id>:
-#   key<TAB>label<TAB>title<TAB>detail<TAB>epochMillis<TAB>model<TAB>claudePid
-# The resident renders one card per live session.
+# Each Claude Code session (session_id) gets its own file under sessions\<id>, 10 TAB fields:
+#   key<TAB>label<TAB>title<TAB>detail<TAB>epochMillis<TAB>model<TAB>claudePid<TAB>field8<TAB>transcriptPath<TAB>cwd
+# field8 is an unused empty placeholder (WT tab-level jump was removed; kept so field9
+# transcript / field10 cwd keep their indices). The resident renders one card per live session.
 # Event: prompt | attention | permreq | busy | done | idle | end | answered
 param([string]$Event = 'done')
 $ErrorActionPreference = 'SilentlyContinue'
@@ -35,7 +36,6 @@ function ExistingTitle { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Co
 function ExistingDetail { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 4) { return $p[3] } } return '' }
 function ExistingModel { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 6) { return $p[5] } } return '' }
 function ExistingPid { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 7) { return $p[6] } } return '' }
-function ExistingFp  { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 8) { return $p[7] } } return '' }
 function ExistingTp  { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 9) { return $p[8] } } return '' }
 function ExistingCwd { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 10) { return $p[9] } } return '' }
 
@@ -47,34 +47,6 @@ function CleanRec($s) {
   if ($s.Length -gt 200) { $s = $s.Substring(0, 200) }
   return $s
 }
-# This session's WT tab Name == its console title. Hooks run as children of claude.exe
-# and share its console, so [Console]::Title reads the tab title directly -- no P/Invoke,
-# no Add-Type, the common path. Fallback for a hook spawned without an inherited console:
-# attach to claude's console explicitly (kernel32 lazily compiled so the fast path never
-# pays the ~400ms). Best-effort: an empty result just keeps the previous fingerprint.
-function Get-HostTitle {
-  $t = ''; try { $t = [string][Console]::Title } catch {}
-  if ($t) { return $t }
-  if ($cpid -le 0) { return '' }
-  try {
-    if (-not ('PetCon.K' -as [type])) {
-      Add-Type -Namespace PetCon -Name K -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole();
-[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
-[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode)] public static extern int GetConsoleTitle(System.Text.StringBuilder sb, int n);
-'@
-    }
-    [void][PetCon.K]::FreeConsole()
-    if ([PetCon.K]::AttachConsole([uint32]$cpid)) {
-      $sb = New-Object System.Text.StringBuilder 512
-      [void][PetCon.K]::GetConsoleTitle($sb, 512)
-      $t = $sb.ToString()
-    }
-    [void][PetCon.K]::FreeConsole()
-  } catch {}
-  return $t
-}
-
 # model shown on the card = the model of this session's LAST reply, parsed from the
 # transcript tail. Honest per-session semantics: never claims "current model" (hooks
 # don't expose one), so multiple sessions on different models each show their own;
@@ -144,9 +116,10 @@ if (-not $mdl) { $mdl = ExistingModel }   # events without transcript_path keep 
 function WriteSession($key, $label, $title, $detail, $model) {
   if (-not $model) { $model = $mdl }
   $cp = "$cpid"; if ($cpid -le 0) { $cp = ExistingPid }   # one flaky capture must not wipe a good pid
-  # field 8 = WT tab fingerprint (this session's console/tab title, for tab-level jump);
-  # a flaky/empty read keeps the old value so it is never wiped
-  $fp = CleanRec (Get-HostTitle); if (-not $fp) { $fp = ExistingFp }
+  # field 8 = unused placeholder (WT tab-level jump was removed; WT jumps are window-level
+  # only, VS Code stays tab-level via the companion handshake). Kept empty so field 9
+  # (transcript) and field 10 (cwd) keep their indices -- do NOT renumber.
+  $fp = ''
   # field 9 = transcript path (the resident tails it to catch Esc-interrupts, which fire
   # no Stop hook); events without a transcript_path keep the old value
   $tpF = CleanRec $tp; if (-not $tpF) { $tpF = ExistingTp }
@@ -269,9 +242,10 @@ switch ($Event) {
     # the resident's 7-day storage TTL does the eventual purge of truly dead sessions
     $c = RU $file
     if ($c) {
-      $p = $c -split "`t"; while ($p.Count -lt 6) { $p += '' }
+      $p = $c -split "`t"; while ($p.Count -lt 10) { $p += '' }
       $p[0] = 'idle'
       $p[4] = "$([long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) - 1860000)"
+      if ($p[7]) { $p[7] = '' }   # field 8 unused: clear any stale fingerprint (keep field9/field10)
       [IO.File]::WriteAllText($file, ($p -join "`t"), (New-Object Text.UTF8Encoding($false)))
     }
     Remove-Item "$file.dismiss" -Force -ErrorAction SilentlyContinue

@@ -65,9 +65,13 @@
   指向陌生进程),命中第一个持真实顶层窗口的祖先(WT / VS Code / 独立控制台同一算法通吃)→ 最小化先还原 +
   `SetForegroundWindow`(点击宠物的瞬间本进程持前台授予,调用合法;失败兜底 AttachThreadInput 握手)。跳不了
   (PID 已死 / 被非 claude 进程复用 / 爬不到窗口 / 老 6 字段记录)→ 卡片横向摇头,**不跳不猜**;手型光标=可跳、
-  默认光标=不可跳,affordance 不说谎。宠物自身只到窗口级;VS Code 内 tab 级由伴生扩展补全(见下条),
-  WT 的 tab 级仍是后续独立刀(AttachConsole 读标题+UIA 选 tab;`wt focus-tab` CLI 在 1.23/1.24 有
-  开新 tab 回归 #19324,1.25 才修,且 CLI 根本没有 pid→tab 映射,不可依赖)。
+  默认光标=不可跳,affordance 不说谎。宠物自身只到窗口级;VS Code 内 tab 级由伴生扩展补全(见下条)。
+  **WT 的 tab 级已调查后放弃、相关代码已删(2026-07-08)**:结构上不可行——WT 对外一律只见
+  WindowsTerminal.exe、死不漏宿主 shell 的 PID(UIA 全树 ProcessId 全是 WT;AttachConsole+
+  GetConsoleProcessList 不暴露 OpenConsole;`wt focus-tab` 只能按索引、无 pid→tab 映射),实测
+  S-PID-INDEX 挂。故 WT 仅窗口级;要 tab 精度用 VS Code 或手动给 tab 改不同名。详见 4 份 Codex
+  收敛稿 `docs/wt-tab-jump-{diagnosis-design,pid-investigation,solution-space}.md` + 删刀计划
+  `docs/audits/2026-07-08-删WT-tab跳转.md`。(field 8 曾是 tab 指纹,现为空占位、不重编号。)
 - **VS Code tab 级跳转 = 伴生扩展握手(1.3.0)**:纯外部无法聚焦 VS Code 内部终端面板(Electron 无障碍树
   不可靠、CLI 无命令口子),业界正解=自装扩展从内部干。常驻在**窗口级跳转成功后**把该会话的祖先 PID 链
   (Find-HostWindow 爬链的副产品,存 `$script:jumpChain`,预热时已填好 → 缓存命中的点击也拿得到)写入
