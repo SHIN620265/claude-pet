@@ -391,6 +391,9 @@ function L($key, $fallback) {
 }
 Load-Strings
 $sv = ((RU (Join-Path $root 'sound.txt')) + '').Trim().ToLower(); $script:soundOn = ($sv -ne 'off')
+# privacy mode: default OFF. When ON, cards show a non-content label (cwd basename) instead of the
+# prompt/reply text -- for screen-sharing/recording. Opt-in via the tray menu; nothing is hidden by default.
+$pv = ((RU (Join-Path $root 'privacy.txt')) + '').Trim().ToLower(); $script:privacy = ($pv -eq 'on')
 
 function Set-Title($sid, $newTitle) {
   $fp = Join-Path $sessDir $sid
@@ -592,6 +595,11 @@ $miSound.Text = L 'sound' 'Sound'
 $miSound.Checked = $script:soundOn
 $miSound.add_Click({ param($snd, $e) $script:soundOn = -not $script:soundOn; WU (Join-Path $root 'sound.txt') ($(if ($script:soundOn) { 'on' } else { 'off' })); $miSound.Checked = $script:soundOn })
 [void]$menu.Items.Add($miSound)
+$miPrivacy = New-Object System.Windows.Forms.ToolStripMenuItem
+$miPrivacy.Text = L 'privacy' 'Privacy mode'
+$miPrivacy.Checked = $script:privacy
+$miPrivacy.add_Click({ param($snd, $e) $script:privacy = -not $script:privacy; WU (Join-Path $root 'privacy.txt') ($(if ($script:privacy) { 'on' } else { 'off' })); $miPrivacy.Checked = $script:privacy; $script:lastSig = '__'; $script:fsDirty = $true })
+[void]$menu.Items.Add($miPrivacy)
 $miLang = New-Object System.Windows.Forms.ToolStripMenuItem
 $miLang.Text = L 'language' 'Language'
 $script:langItems = @{}
@@ -622,6 +630,7 @@ function Apply-Lang {
   $miClose.Text = L 'closePet' 'Close pet'
   $miReset.Text = L 'resetPos' 'Reset position'
   $miSound.Text = L 'sound' 'Sound'
+  $miPrivacy.Text = L 'privacy' 'Privacy mode'
   $miLang.Text = L 'language' 'Language'
   $miAuto.Text = L 'auto' 'Auto'
   Update-LangChecks
@@ -830,7 +839,7 @@ function Edit-Row-Layered($idx) {
   $gm = $script:cardGeom; if (-not $gm) { return }
   $cur = ''; $c = RU (Join-Path $sessDir $sid); if ($c) { $cur = ($c -split "`t")[2] }
   $ry = $gm.pad + $idx * ($gm.rowH + $gm.rowGap)
-  $script:editSid = $sid; $script:editing = $true; $script:editStart = Get-Date
+  $script:editSid = $sid; $script:editing = $true
   $script:editWin.SetBounds(($script:cardPosX + $gm.pad + $gm.m), ($script:cardPosY + $ry + [int](6 * $gm.scale)), ($gm.cardW - 2*$gm.m - [int](38*$gm.scale)), [int](22 * $gm.scale))
   $script:editTb.Text = $cur
   $script:editWin.Show(); [Lp]::Activate($script:editWin.Handle); $script:editTb.Focus(); $script:editTb.SelectAll()
@@ -903,6 +912,8 @@ function Update-Card {
   if ($lng -ne $script:lastLang) { Apply-Lang }
   $snd = (((RU (Join-Path $root 'sound.txt')) + '').Trim().ToLower() -ne 'off')
   if ($snd -ne $script:soundOn) { $script:soundOn = $snd; $miSound.Checked = $snd }
+  $prv = (((RU (Join-Path $root 'privacy.txt')) + '').Trim().ToLower() -eq 'on')
+  if ($prv -ne $script:privacy) { $script:privacy = $prv; $miPrivacy.Checked = $prv; $script:lastSig = '__' }
   $list = @()
   foreach ($f in @(Get-ChildItem $sessDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.' })) {
     $c = RU $f.FullName; if (-not $c) { continue }
@@ -916,7 +927,13 @@ function Update-Card {
     if ($idleMs -gt 1800000) { continue }
     $dp = "$($f.FullName).dismiss"
     if (Test-Path $dp) { $de = 0L; [long]::TryParse((RU $dp), [ref]$de) | Out-Null; if ($de -ge $epoch) { continue } }
-    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$p[2]; detail=$(if($p.Count -ge 4){$p[3]}else{''}); epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}) }
+    $ttl = $p[2]; $dtl = $(if ($p.Count -ge 4) { $p[3] } else { '' })
+    if ($script:privacy) {   # mask content (prompt/reply) -> non-content label (cwd basename); detail blank
+      $b = ''; if ($p.Count -ge 10 -and $p[9]) { $b = Split-Path $p[9] -Leaf }
+      if (-not $b) { $b = L 'session' 'Session' }
+      $ttl = $b; $dtl = ''
+    }
+    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$ttl; detail=$dtl; epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}) }
   }
   # minimal hybrid: float 'attention' (needs you) to the top; everything else stays newest-first
   $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true})

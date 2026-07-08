@@ -14,6 +14,7 @@
 | `strings.json` | — | 多语种资源(加语言只需加一个块,含 `_name`) |
 
 **运行时文件**(均在 `~/.claude/pet-data`):`lang.txt`(`auto/zh/en/ja`)、`sound.txt`(`on/off`)、
+`privacy.txt`(`on/off`;隐私模式:卡片正文打码为 cwd 项目名、详情清空)、`card-layered.flag`(dogfood 开关:平滑分层卡)、
 `pet-state.txt`(开关记忆)、`pet-pos.txt`(位置)、`pet.pid`、`events.log`(调试,超 256KB 自动重建)、
 `sessions\<id>`(+`.dismiss` 关闭标记、`.titlelock` 改名锁定、`.pending` 认命令布防:
 `claudePid<TAB>armEpochMillis<TAB>归一化命令片段`,permreq 布防、其余事件拆防、常驻消费)、
@@ -102,7 +103,7 @@
   卡片上时,纯几何会隔窗点亮珊瑚环,而点击根本到不了卡片(affordance 说谎,用户实测抓到)。必须加
   `WindowFromPoint`+`GetAncestor(GA_ROOT)`==card.Handle 顶层核验(T34)。图标 ✎/× 的 hover 走真实
   MouseEnter/Leave 消息,天然不穿窗,无需此守卫。
-- 模型徽标**只在回合结束态(done/idle)渲染**,回合中(thinking/attention)一律隐藏——正在跑的模型平台不暴露
+- 模型徽标**只在回合结束态(done/idle/interrupted)渲染**,回合中(thinking/attention)一律隐藏——正在跑的模型平台不暴露
   (钩子 payload 无 model 字段,settings 只有全局默认),显示"上一条的模型"会被读成"正在思考的模型"而误导。
 - done 卡的 detail = **回复首句摘要**,与徽标取自 transcript(`transcript_path`)尾部**同一条** assistant 消息
   (同源:徽标标注的正是产出这段文字的模型);提取跳过 `isSidechain` 子代理条目与纯 tool_use 条目,只认

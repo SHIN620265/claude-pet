@@ -1,5 +1,5 @@
 {
-  "zh": { "_name": "中文", "language": "语言", "auto": "自动(跟随系统)", "sound": "提示音", "thinking": "正在思考", "attention": "需要你确认 / 选择", "done": "已完成", "idle": "空闲", "interrupted": "已中断", "newSession": "新会话", "closePet": "关闭宠物", "resetPos": "回到默认位置" },
-  "en": { "_name": "English", "language": "Language", "auto": "Auto (system)", "sound": "Sound", "thinking": "Thinking…", "attention": "Needs your input", "done": "Done", "idle": "Idle", "interrupted": "Interrupted", "newSession": "New session", "closePet": "Close pet", "resetPos": "Reset position" },
-  "ja": { "_name": "日本語", "language": "言語", "auto": "自動(システム)", "sound": "通知音", "thinking": "考え中…", "attention": "確認 / 選択が必要", "done": "完了", "idle": "待機中", "interrupted": "中断済み", "newSession": "新しい会話", "closePet": "ペットを閉じる", "resetPos": "位置をリセット" }
+  "zh": { "_name": "中文", "language": "语言", "auto": "自动(跟随系统)", "sound": "提示音", "thinking": "正在思考", "attention": "需要你确认 / 选择", "done": "已完成", "idle": "空闲", "interrupted": "已中断", "privacy": "隐私模式", "session": "会话", "newSession": "新会话", "closePet": "关闭宠物", "resetPos": "回到默认位置" },
+  "en": { "_name": "English", "language": "Language", "auto": "Auto (system)", "sound": "Sound", "thinking": "Thinking…", "attention": "Needs your input", "done": "Done", "idle": "Idle", "interrupted": "Interrupted", "privacy": "Privacy mode", "session": "Session", "newSession": "New session", "closePet": "Close pet", "resetPos": "Reset position" },
+  "ja": { "_name": "日本語", "language": "言語", "auto": "自動(システム)", "sound": "通知音", "thinking": "考え中…", "attention": "確認 / 選択が必要", "done": "完了", "idle": "待機中", "interrupted": "中断済み", "privacy": "プライバシー", "session": "セッション", "newSession": "新しい会話", "closePet": "ペットを閉じる", "resetPos": "位置をリセット" }
 }
