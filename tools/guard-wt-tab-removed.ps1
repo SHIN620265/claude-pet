@@ -2,7 +2,8 @@
 # fields intact. AST-based (comment/string-safe) static asserts + real new-write & self-heal
 # fixtures + parse/compile/ASCII. Exit 1 on any red. Run under pwsh (invokes 5.1 for G6).
 $ErrorActionPreference = 'Stop'
-$pet = $PSScriptRoot
+# lives in tools/ (dev-only, not shipped); the code it guards is the sibling pet/ dir
+$pet = Join-Path (Split-Path $PSScriptRoot -Parent) 'pet'
 $fail = @()
 function Red($m) { $script:fail += $m; Write-Host "RED  $m" }
 function Grn($m) { Write-Host "ok   $m" }

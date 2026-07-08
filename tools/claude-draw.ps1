@@ -1,6 +1,7 @@
 Add-Type -AssemblyName System.Drawing
 
-$dir = $PSScriptRoot
+# lives in tools/ (dev-only); writes the sprites into the sibling pet/ dir (the shipped assets)
+$dir = Join-Path (Split-Path $PSScriptRoot -Parent) 'pet'
 if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
 
 function B([int]$r,[int]$g2,[int]$b,[int]$a=255){ New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($a,$r,$g2,$b)) }

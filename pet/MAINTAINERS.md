@@ -9,9 +9,9 @@
 | `pet-event.ps1` | **pwsh(7)** | 钩子→状态桥:`prompt/attention/done/busy/idle/end`,写 `sessions\<id>` |
 | `pet-session-start.ps1` | pwsh(7) | SessionStart:登记本会话、按上次状态拉起宠物 |
 | `pet-toggle.ps1` | pwsh(7) | `/my-pet` 开关,输出 ASCII `on`/`off` |
-| `pet-sounds.ps1` | 任意 | 生成 `done.wav` / `attn.wav` |
-| `claude-draw.ps1` | 任意 | 生成 `claude-idle/blink/happy.png` |
 | `strings.json` | — | 多语种资源(加语言只需加一个块,含 `_name`) |
+
+**开发工具**(仓库根 `tools/`,**不随插件发布**——marketplace `source:"./pet"` 只收 `pet/`;这些写入/校验 `pet/` 但自身不在其中):`pet-sounds.ps1`(生成 `done.wav`/`attn.wav`)、`claude-draw.ps1`(生成 `claude-idle/blink/happy.png`)、`guard-wt-tab-removed.ps1`(WT 删刀回归守卫 G1-G7,`pwsh tools/guard-wt-tab-removed.ps1`)。
 
 **运行时文件**(均在 `~/.claude/pet-data`):`lang.txt`(`auto/zh/en/ja`)、`sound.txt`(`on/off`)、
 `privacy.txt`(`on/off`;隐私模式:卡片正文打码为 cwd 项目名、详情清空)、`card-layered.flag`(dogfood 开关:平滑分层卡)、
@@ -153,8 +153,8 @@ $code="<插件安装目录或仓库 pet 目录>"   # 脚本所在
 # 重启常驻
 Get-Content "$data\pet.pid" | % { Stop-Process -Id $_ -Force -EA SilentlyContinue }
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$code\pet-resident.ps1"
-# 重新生成提示音 / 形象(写入 $code,常驻启动时按 mtime 镜像到 $data)
-& "$code\pet-sounds.ps1"; & "$code\claude-draw.ps1"
+# 重新生成提示音 / 形象(dev 工具在仓库 tools/,写入 pet/,常驻启动时按 mtime 镜像到 $data)
+& "$code\..\tools\pet-sounds.ps1"; & "$code\..\tools\claude-draw.ps1"
 # 手动开关
 pwsh -NoProfile -ExecutionPolicy Bypass -File "$code\pet-toggle.ps1"
 ```

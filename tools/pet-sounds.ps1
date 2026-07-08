@@ -5,7 +5,8 @@
 #          (Industrial-urgency tricks are wrong here: the user hears it many times a day, so
 #           personality / low annoyance matters more than raw urgency.)
 # Smooth sine partials + fast attack + exponential decay; quiet; follows system volume.
-$dir = $PSScriptRoot
+# lives in tools/ (dev-only); writes the chimes into the sibling pet/ dir (the shipped assets)
+$dir = Join-Path (Split-Path $PSScriptRoot -Parent) 'pet'
 
 $partialsWarm = @(
   @{ mult = 1.00; amp = 1.00; decay = 1.0 },
