@@ -1,6 +1,6 @@
-# 维护说明(for maintainers)
+# 架构说明(ARCHITECTURE)
 
-面向改代码的人。用户使用手册见 `README.md`。
+面向改代码的人:代码地图、工作原理、踩过的坑。用户使用手册见 `README.md`。
 
 ## 文件清单(脚本在插件安装目录,开发时即仓库 `pet\`;运行时数据在 `~/.claude/pet-data`)
 | 文件 | 跑在 | 作用 |

@@ -134,7 +134,7 @@ $projOr = $proj   # may be empty; the resident localizes an empty title to "new 
 function TitleOr { $t = ExistingTitle; if ($t) { return $t } else { return $projOr } }
 
 # approved-command watch sidecar (sessions\<id>.pending): armed by permreq, consumed by
-# the resident (see MAINTAINERS). Any event other than the two attention writers means
+# the resident (see ARCHITECTURE). Any event other than the two attention writers means
 # the dialog is no longer pending -> disarm so a stale snippet can never match later.
 $pend = "$file.pending"
 if ($Event -ne 'permreq' -and $Event -ne 'attention') { Remove-Item $pend -Force -ErrorAction SilentlyContinue }

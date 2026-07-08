@@ -67,7 +67,7 @@ if ($src -eq 'clear') {
   [IO.File]::WriteAllText($file, $idleRec, (New-Object Text.UTF8Encoding($false)))
 } elseif ($cpid -gt 0) {
   # resume / compact / re-register: the card itself stays untouched (title, state and
-  # epoch are the session's memory -- see MAINTAINERS pitfall 8), but the claude PID
+  # epoch are the session's memory -- see ARCHITECTURE pitfall 8), but the claude PID
   # (field 7) must follow the session into its new claude.exe; field 9 (transcript path)
   # and field 10 (cwd) are refreshed too so the interrupt watch and multi-window jump
   # track the resumed window. field 8 is unused now (WT tab jump removed) and any stale
