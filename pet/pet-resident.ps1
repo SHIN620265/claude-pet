@@ -315,9 +315,10 @@ function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow, $hoverIcon)
     $title = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
     $titleMax = $gm.cardW - 2*$gm.m - [int](38*$gm.scale)
     $g.DrawString((Fit-Text $g $title $fTitle $titleMax), $fTitle, $brTitle, [single]($gm.pad + $gm.m), [single]($y + [int](6*$gm.scale)))
-    $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += (L $s.key $s.label); if ($s.detail) { $parts += $s.detail }
+    $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
+    $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += (L $ek $s.label); if ($s.detail) { $parts += $s.detail }
     $stat = ($parts -join $sep)
-    $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
+    $col = $stateColors[$ek]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
     $brS = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, $col.R, $col.G, $col.B))
     $statMax = $gm.cardW - 2*$gm.m - [int](22*$gm.scale); if ($overflow -gt 0 -and $i -eq ($rows-1)) { $statMax -= [int](30*$gm.scale) }
     $g.DrawString((Fit-Text $g $stat $fStat $statMax), $fStat, $brS, [single]($gm.pad + $gm.m), [single]($y + [int](27*$gm.scale))); $brS.Dispose()
@@ -358,7 +359,7 @@ function Compose-CardFrame($cache, $list, $gm, $spinChar) {
   for ($i = 0; $i -lt $list.Count; $i++) {
     $k = $list[$i].key; $y = $gm.pad + $i*($gm.rowH + $gm.rowGap); $glyph = ''; $col = $null
     if ($k -eq 'thinking') { $glyph = [string]$spinChar; $col = [System.Drawing.Color]::FromArgb(255,60,130,210) }
-    elseif ($k -eq 'done') { $glyph = [string][char]0x2713; $col = [System.Drawing.Color]::FromArgb(255,70,170,90) }
+    elseif ($k -eq 'done') { if ($list[$i].bg) { $glyph = [string]$spinChar; $col = [System.Drawing.Color]::FromArgb(255,60,130,210) } else { $glyph = [string][char]0x2713; $col = [System.Drawing.Color]::FromArgb(255,70,170,90) } }
     elseif ($k -eq 'attention') { $glyph = '!'; $col = [System.Drawing.Color]::FromArgb(255,225,150,40) }
     if ($glyph) { $br = New-Object System.Drawing.SolidBrush($col); $g.DrawString($glyph, $fSpin, $br, [single]($gm.pad + $gm.cardW - $gm.m - [int](16*$gm.scale)), [single]($y + [int](26*$gm.scale))); $br.Dispose() }
   }
@@ -452,6 +453,105 @@ function Test-Interrupted($tp) {
   $last = ''
   foreach ($ln in ($text -split "`n")) { $t = $ln.Trim(); if ($t) { $last = $t } }
   return ($last -match '"interruptedMessageId"')
+}
+
+# ---- background-running detection (B+N dual signal); see docs/background-running-awareness-design.md ----
+# A 'done' card lies while the session still has a background task running (an Agent-tool task or a
+# Bash run_in_background shell). Two CC-native, zero-token signals decide it:
+#   B  a background Bash's harness .output file is held open for the task's whole life -> an exclusive
+#      open fails while it runs, succeeds when done. (Agent tasks do NOT hold handles, so B is bash-only.)
+#   N  pair a launch (tool_use Agent/SendMessage/Bash+run_in_background) to its task id, cleared by the
+#      injected <task-notification> completion record. The 'has a real <tool-use-id>toolu_' gate blocks
+#      our own echoed <task-id> examples in prose. Incremental: only new transcript bytes are scanned.
+# Guards: liveness (claude PID alive + born before the launch -> kills PID-reuse / pre-restart ledgers;
+#         metadata miss -> honest false); shape drift telemetry (a held .output whose id N never saw as a
+#         launch, surviving >=2 passes, is logged -- CC's notification shape may have changed).
+function BgHeld($path) {
+  try { $fs = [IO.File]::Open($path, 'Open', 'Read', 'None'); $fs.Close(); return $false }
+  catch [System.IO.IOException] { return $true } catch { return $false }
+}
+function BgTaskId($txt) {
+  if ($txt -match 'agentId:\s*([0-9a-f]{10,})') { return $Matches[1] }
+  if ($txt -match 'background with ID:\s*([0-9a-z]{6,})') { return $Matches[1] }
+  return $null
+}
+function BgScanN($sid, $tp) {
+  if (-not $script:bgState.ContainsKey($sid)) { $script:bgState[$sid] = @{ off = 0L; frag = ''; launchIds = @{}; pending = @{}; known = @{} } }
+  $st = $script:bgState[$sid]
+  $fi = $null; try { $fi = Get-Item $tp -ErrorAction Stop } catch { return $st }
+  $size = $fi.Length
+  if ($size -lt $st.off) { $st.off = 0L; $st.frag = ''; $st.launchIds = @{}; $st.pending = @{}; $st.known = @{} }
+  if ($size -le $st.off) { return $st }
+  $bytes = $null; $fs = $null
+  try {
+    $fs = [IO.File]::Open($tp, 'Open', 'Read', 'ReadWrite')
+    [void]$fs.Seek($st.off, 'Begin'); $bytes = New-Object byte[] ($size - $st.off); $rd = $fs.Read($bytes, 0, $bytes.Length); $fs.Close()
+  } catch { if ($fs) { try { $fs.Close() } catch {} }; return $st }
+  $text = $st.frag + [Text.Encoding]::UTF8.GetString($bytes, 0, $rd)
+  $st.off = $size
+  $lines = $text -split "`n"; $st.frag = $lines[$lines.Count - 1]
+  for ($li = 0; $li -lt $lines.Count - 1; $li++) {
+    $line = $lines[$li]; if (-not $line) { continue }
+    if ($line.Contains('<task-notification>') -and $line.Contains('<tool-use-id>toolu_')) {
+      if ($line -match '<task-id>([^<\\]+)') {
+        $tid = $Matches[1].Trim()
+        $sta = if ($line -match '<status>([^<\\]+)') { $Matches[1].Trim().ToLower() } else { 'completed' }
+        if (@('running','started','resumed','in_progress') -notcontains $sta) { [void]$st.pending.Remove($tid) }
+      }
+    }
+    $mayL = ($line.Contains('"type":"tool_use"') -and ($line.Contains('"name":"Agent"') -or $line.Contains('"name":"SendMessage"') -or $line.Contains('run_in_background')))
+    $mayR = ($line.Contains('"type":"tool_result"') -and ($line.Contains('agentId:') -or $line.Contains('background with ID')))
+    if (-not ($mayL -or $mayR)) { continue }
+    $obj = $null; try { $obj = $line | ConvertFrom-Json } catch { continue }
+    $ts = 0L; if ($line -match '"timestamp":"([^"]+)"') { try { $ts = [DateTimeOffset]::Parse($Matches[1]).ToUnixTimeMilliseconds() } catch {} }
+    $content = $obj.message.content; if ($content -isnot [System.Array]) { continue }
+    foreach ($blk in $content) {
+      if ($blk.type -eq 'tool_use') {
+        $nm = "$($blk.name)"
+        if (($nm -eq 'Agent') -or ($nm -eq 'SendMessage') -or (($nm -eq 'Bash' -or $nm -eq 'PowerShell') -and $blk.input.run_in_background)) { $st.launchIds[$blk.id] = $true }
+      } elseif ($blk.type -eq 'tool_result') {
+        if ($st.launchIds.ContainsKey($blk.tool_use_id)) {
+          $rt = if ($blk.content -is [System.Array]) { ($blk.content | ForEach-Object { $_.text }) -join "`n" } else { "$($blk.content)" }
+          $tid = BgTaskId $rt
+          if ($tid) { $st.pending[$tid] = $ts; $st.known[$tid] = $true }
+        }
+      }
+    }
+  }
+  return $st
+}
+function BgRunning($sid, $tp, $claudePid, $nowMs) {
+  if (-not $tp) { return $false }   # old 7-field record has no transcript -> honest degrade, no overlay
+  $slug = ''; try { $slug = Split-Path (Split-Path $tp -Parent) -Leaf } catch {}
+  $tasksDir = if ($slug) { Join-Path $script:bgTasksRoot (Join-Path $slug (Join-Path $sid 'tasks')) } else { '' }
+  $hasDir = ($tasksDir -and (Test-Path $tasksDir))
+  # B: any background-bash .output currently held open
+  $bHeld = $false
+  if ($hasDir) { foreach ($of in @(Get-ChildItem $tasksDir -Filter 'b*.output' -File -ErrorAction SilentlyContinue)) { if (BgHeld $of.FullName) { $bHeld = $true; break } } }
+  # N: pending launches, then liveness/birth guard
+  $st = BgScanN $sid $tp
+  $nRun = $false
+  if ($st.pending.Count -gt 0) {
+    $birthMs = -1
+    $pr = $null; if ($claudePid) { try { $pr = Get-CimInstance Win32_Process -Filter "ProcessId=$claudePid" -ErrorAction SilentlyContinue } catch {} }
+    if (-not $pr -or ("$($pr.Name)" -notlike 'claude*')) { $st.pending = @{} }   # claude gone -> nothing it launched still runs
+    else { try { $birthMs = [DateTimeOffset]::new([DateTime]$pr.CreationDate).ToUnixTimeMilliseconds() } catch { $birthMs = -1 } }
+    if ($st.pending.Count -gt 0) {
+      if ($birthMs -lt 0) { $st.pending = @{} }                                  # metadata miss -> honest false
+      else { foreach ($k in @($st.pending.Keys)) { $lt = $st.pending[$k]; if ($lt -gt 0 -and $lt -lt $birthMs) { [void]$st.pending.Remove($k) } } }   # pre-restart / PID-reuse
+    }
+    $nRun = ($st.pending.Count -gt 0)
+  }
+  # shape-drift telemetry: a held .output N never saw a launch for, surviving >=2 passes, means CC's shape moved
+  if ($hasDir) {
+    foreach ($of in @(Get-ChildItem $tasksDir -Filter '*.output' -File -ErrorAction SilentlyContinue)) {
+      $tid = $of.BaseName
+      if ($st.known.ContainsKey($tid) -or -not (BgHeld $of.FullName)) { [void]$script:bgShape.Remove($tid); continue }
+      if (-not $script:bgShape.ContainsKey($tid)) { $script:bgShape[$tid] = $nowMs }
+      elseif (($nowMs - $script:bgShape[$tid]) -ge 3000) { if (-not $bHeld) { LogEv ('bgshape-drift id=' + $tid) }; $bHeld = $true }
+    }
+  }
+  return ($bHeld -or $nRun)
 }
 # Walk up the parent chain from a claude.exe PID to the first ancestor owning a real
 # top-level window (Windows Terminal, VS Code, a plain console, ...). Each ancestor must
@@ -860,6 +960,7 @@ $stateColors = @{
   done      = [System.Drawing.Color]::FromArgb(70,170,90)
   idle      = [System.Drawing.Color]::FromArgb(140,140,145)
   interrupted = [System.Drawing.Color]::FromArgb(120,118,126)   # user-stopped: neutral/calm (grey, not red -- interrupting is a normal choice, not an error)
+  bgRunning = [System.Drawing.Color]::FromArgb(60,130,210)      # done card, but a background task still runs -> blue like thinking
 }
 
 # ---- state ----
@@ -879,6 +980,11 @@ $script:rowPids = New-Object 'string[]' $MAXROWS; $script:shakeN = 0
 $script:jumpCache = @{}; $script:lastWarm = $now0   # claudePid -> host HWND (pre-warmed so the first click is instant)
 $script:jumpChain = @{}   # claudePid -> ancestor PID chain from that walk (consumed by the VS Code companion handshake)
 $script:lastIntr = $now0
+$script:lastBg = $now0                                   # background-running detection cadence
+$script:bgState = @{}; $script:bgShape = @{}             # per-sid N-scan ledgers + shape-drift candidates
+$script:bgSids = New-Object 'System.Collections.Generic.HashSet[string]'   # sids currently overlaid "background running"
+$script:bgTasksRoot = Join-Path $env:LOCALAPPDATA 'Temp\claude'            # %LocalAppData%\Temp\claude\<slug>\<sid>\tasks
+$script:rowBg = New-Object 'bool[]' $MAXROWS             # per-row bg-running flag (parallel to rowKeys/rowSids)
 $script:fsDirty = $false
 $script:editing = $false; $script:editSid = ''
 $spinChars = @(0x280B,0x2819,0x2839,0x2838,0x283C,0x2834,0x2826,0x2827,0x2807,0x280F) | ForEach-Object { [char]$_ }
@@ -933,7 +1039,8 @@ function Update-Card {
       if (-not $b) { $b = L 'session' 'Session' }
       $ttl = $b; $dtl = ''
     }
-    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$ttl; detail=$dtl; epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}) }
+    $bgr = ($p[0] -eq 'done' -and $script:bgSids.Contains($f.Name))
+    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$ttl; detail=$dtl; epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}); bg=$bgr }
   }
   # minimal hybrid: float 'attention' (needs you) to the top; everything else stays newest-first
   $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true})
@@ -954,11 +1061,11 @@ function Update-Card {
 
   if ((Test-Path $collapsePath) -or $list.Count -eq 0) {
     if ($script:cardShown) { $card.Hide(); $script:cardShown = $false }
-    for ($i=0; $i -lt $MAXROWS; $i++){ $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = '' }
+    for ($i=0; $i -lt $MAXROWS; $i++){ $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = ''; $script:rowBg[$i] = $false }
     return
   }
 
-  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)|$($_.cpid)" }) -join '##') + "|ov=$overflow"
+  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)|$($_.cpid)|$($_.bg)" }) -join '##') + "|ov=$overflow"
   if ($script:layered) {
     # layered path: rebuild the cached shadow+static layers on any content/hover/selection
     # change; the tick composes the spinner frame and pushes. Row maps stay in sync for jump.
@@ -976,8 +1083,8 @@ function Update-Card {
       for ($i = 0; $i -lt $list.Count; $i++) { [void]$hitr.Add($gm.pad); [void]$hitr.Add($gm.pad + $i*($gm.rowH + $gm.rowGap)); [void]$hitr.Add($gm.cardW); [void]$hitr.Add($gm.rowH) }
       $card.HitRects = $hitr.ToArray()
       for ($i = 0; $i -lt $MAXROWS; $i++) {
-        if ($i -lt $list.Count) { $script:rowKeys[$i] = $list[$i].key; $script:rowSids[$i] = $list[$i].sid; $script:rowPids[$i] = $list[$i].cpid }
-        else { $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = '' }
+        if ($i -lt $list.Count) { $script:rowKeys[$i] = $list[$i].key; $script:rowSids[$i] = $list[$i].sid; $script:rowPids[$i] = $list[$i].cpid; $script:rowBg[$i] = $list[$i].bg }
+        else { $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = ''; $script:rowBg[$i] = $false }
       }
       $script:cardH = ($list.Count * ($rowH + $rowGap)) - $rowGap
       $script:lastSig = $lsig; $script:cardDirty = $true
@@ -986,25 +1093,26 @@ function Update-Card {
     for ($i = 0; $i -lt $MAXROWS; $i++) {
       if ($i -lt $list.Count) {
         $s = $list[$i]
-        $lab = L $s.key $s.label
+        $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
+        $lab = L $ek $s.label
         $rowTitle[$i].Text = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
         # status line: [model badge, post-turn states only] . state . detail
         # mid-turn (thinking/attention) the badge would read as "the model currently
         # running", which we cannot truthfully know -- so it only renders on done/idle
         $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += $lab; if ($s.detail) { $parts += $s.detail }
         $rowState[$i].Text = ($parts -join "  $([char]0x00B7)  ")
-        $col = $stateColors[$s.key]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
+        $col = $stateColors[$ek]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
         $rowState[$i].ForeColor = $col
         # hand cursor = this row can jump (has a recorded claude PID); default = it cannot
         # (legacy record, heals on the session's next event) -- the affordance never lies
         $csr = $(if ($s.cpid) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default })
         $rowTitle[$i].Cursor = $csr; $rowState[$i].Cursor = $csr; $rowPanel[$i].Cursor = $csr
-        $script:rowKeys[$i] = $s.key; $script:rowSids[$i] = $s.sid; $script:rowPids[$i] = $s.cpid
+        $script:rowKeys[$i] = $s.key; $script:rowSids[$i] = $s.sid; $script:rowPids[$i] = $s.cpid; $script:rowBg[$i] = $s.bg
         if (-not $rowPanel[$i].Visible) { $rowPanel[$i].Visible = $true }
       } else {
         if ($rowPanel[$i].Visible) { $rowPanel[$i].Visible = $false }
         $rowSpin[$i].Visible = $false
-        $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = ''
+        $script:rowKeys[$i] = ''; $script:rowSids[$i] = ''; $script:rowPids[$i] = ''; $script:rowBg[$i] = $false
       }
     }
     if ($overflow -gt 0 -and $list.Count -eq $MAXROWS) {
@@ -1101,7 +1209,7 @@ $tick.add_Tick({
     if ($script:layered) {
       # recompose cached layers + this spinner frame and push (D6). Only when a thinking
       # card is animating or the cache just changed -- static states need no repush.
-      $anim = $false; for ($i = 0; $i -lt $MAXROWS; $i++) { if ($script:rowKeys[$i] -eq 'thinking') { $anim = $true; break } }
+      $anim = $false; for ($i = 0; $i -lt $MAXROWS; $i++) { if ($script:rowKeys[$i] -eq 'thinking' -or ($script:rowKeys[$i] -eq 'done' -and $script:rowBg[$i])) { $anim = $true; break } }
       if (($script:cardDirty -or $anim) -and $script:cardCache) {
         $work = Compose-CardFrame $script:cardCache $script:cardList $script:cardGeom $ch
         try { [Lp]::SetBitmapStraight($card.Handle, $work, $script:cardPosX, $script:cardPosY) } catch {}
@@ -1115,8 +1223,8 @@ $tick.add_Tick({
         $rowSpin[$i].ForeColor = [System.Drawing.Color]::FromArgb(60,130,210); $rowSpin[$i].Text = $ch
       } elseif ($k -eq 'done') {
         if (-not $rowSpin[$i].Visible) { $rowSpin[$i].Visible = $true }
-        $rowSpin[$i].ForeColor = [System.Drawing.Color]::FromArgb(70,170,90)
-        if ($rowSpin[$i].Text -ne $checkChar) { $rowSpin[$i].Text = $checkChar }
+        if ($script:rowBg[$i]) { $rowSpin[$i].ForeColor = [System.Drawing.Color]::FromArgb(60,130,210); $rowSpin[$i].Text = $ch }
+        else { $rowSpin[$i].ForeColor = [System.Drawing.Color]::FromArgb(70,170,90); if ($rowSpin[$i].Text -ne $checkChar) { $rowSpin[$i].Text = $checkChar } }
       } elseif ($k -eq 'attention') {
         if (-not $rowSpin[$i].Visible) { $rowSpin[$i].Visible = $true }
         $rowSpin[$i].ForeColor = [System.Drawing.Color]::FromArgb(225,150,40)
@@ -1240,6 +1348,29 @@ $tick.add_Tick({
         LogEv ('interrupt->interrupted sid={0}' -f $sid)
       }
     }
+  }
+  # background-running watch: a 'done' card whose session still has a background task running is
+  # overlaid "background running" (render-only; the session file stays the hook's 'done'). Slow
+  # cadence; only done cards pay the scan. On a change, force a re-render.
+  if (($now - $script:lastBg).TotalMilliseconds -ge 1500) {
+    $script:lastBg = $now
+    $bgNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $newSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    for ($i = 0; $i -lt $MAXROWS; $i++) {
+      if ($script:rowKeys[$i] -ne 'done') { continue }
+      $sid = $script:rowSids[$i]; if (-not $sid) { continue }
+      if ($newSet.Contains($sid)) { continue }
+      $c = RU (Join-Path $sessDir $sid); if (-not $c) { continue }
+      $p = $c -split "`t"
+      if ($p[0] -ne 'done') { continue }                          # re-read: row cache can lag a real change
+      $tp = if ($p.Count -ge 9) { $p[8] } else { '' }
+      $cpid = 0; if ($p.Count -ge 7) { [int]::TryParse($p[6], [ref]$cpid) | Out-Null }
+      if (BgRunning $sid $tp $cpid $bgNow) { [void]$newSet.Add($sid) }
+    }
+    $changed = ($newSet.Count -ne $script:bgSids.Count)
+    if (-not $changed) { foreach ($s in $newSet) { if (-not $script:bgSids.Contains($s)) { $changed = $true; break } } }
+    $script:bgSids = $newSet
+    if ($changed) { $script:fsDirty = $true; $script:lastSig = '__' }
   }
 })
 
