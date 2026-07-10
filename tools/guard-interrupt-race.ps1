@@ -26,5 +26,13 @@ try {
   if($r -lt ($markMs+10000)){ Grn "stale interrupt (epoch newer, new prompt) would NOT flip" } else { Red "stale interrupt would re-flip = the bug" }
   [IO.File]::WriteAllText($tmp, '{"type":"user","timestamp":"'+$markTs+'","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}'+"`n", $u8)
   if((Test-Interrupted $tmp) -eq 0){ Grn "non-interrupt tail -> 0" } else { Red "false positive on normal tail" }
+  # interrupt mark buried under injected records (queued task-notification attachments / snapshots)
+  $att='{"type":"attachment","timestamp":"'+$markTs+'","content":"<task-notification>...</task-notification>"}'
+  [IO.File]::WriteAllText($tmp, ($mark+"`n"+$att+"`n"+$att+"`n"), $u8)
+  if((Test-Interrupted $tmp) -eq $markMs){ Grn "interrupt mark under trailing attachments -> still detected" } else { Red "interrupt mark masked by trailing attachments (the bug)" }
+  # a genuine new prompt after the interrupt supersedes it -> 0
+  $newp='{"type":"user","timestamp":"'+$markTs+'","message":{"role":"user","content":[{"type":"text","text":"a new question"}]}}'
+  [IO.File]::WriteAllText($tmp, ($mark+"`n"+$newp+"`n"), $u8)
+  if((Test-Interrupted $tmp) -eq 0){ Grn "new prompt after interrupt -> 0 (superseded)" } else { Red "stale interrupt not cleared by a new prompt" }
 } finally { Remove-Item $tmp -Force -EA SilentlyContinue }
 if($fail.Count){ Write-Host "`nGUARD FAILED: $($fail.Count) red"; exit 1 } else { Write-Host "`nGUARD PASS (interrupt race)"; exit 0 }

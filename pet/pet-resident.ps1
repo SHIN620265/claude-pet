@@ -450,9 +450,16 @@ function Test-Interrupted($tp) {
     $buf = New-Object byte[] $take; [void]$fs.Read($buf, 0, $take); $fs.Dispose()
     $text = [Text.Encoding]::UTF8.GetString($buf)
   } catch { return $false }
-  $last = ''
-  foreach ($ln in ($text -split "`n")) { $t = $ln.Trim(); if ($t) { $last = $t } }
-  if ($last -notmatch '"interruptedMessageId"') { return 0L }
+  # find the last CONVERSATIONAL record (a user/assistant turn). Injected records -- queued
+  # task-notifications (attachment / queue-operation), file-history snapshots, mode markers --
+  # can land after an interrupt mark; they are not a new prompt/reply, so an interrupt mark
+  # buried under them is still the last real turn and must still count as interrupted.
+  $lines = $text -split "`n"; $last = ''
+  for ($li = $lines.Count - 1; $li -ge 0; $li--) {
+    $tl = $lines[$li].Trim(); if (-not $tl) { continue }
+    if ($tl.Contains('"role":"user"') -or $tl.Contains('"role":"assistant"')) { $last = $tl; break }
+  }
+  if (-not $last -or ($last -notmatch '"interruptedMessageId"')) { return 0L }
   # return the interrupt's timestamp (ms) so the caller can ignore an OLD interrupt: after a new
   # prompt the card is 'thinking' again but this mark is briefly still the last durable entry --
   # only a mark at/after the current thinking epoch means "interrupted THIS turn".
