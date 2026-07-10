@@ -48,6 +48,23 @@ try {
   $fs.Close(); $fs=$null
   $script:bgState=@{}; $script:bgShape=@{}
   if(-not (BgRunning $sid $tp $pid0 $now)){ Grn "BgRunning after release = false (recovers)" } else { Red "BgRunning stuck running after handle released" }
+  # N-path: TaskStop terminates without a <task-notification> -> must clear pending (real regression)
+  $u8=New-Object Text.UTF8Encoding($false); $ts=(Get-Date).ToString('o')
+  $agLaunch='{"type":"user","timestamp":"'+$ts+'","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_AG1","content":[{"type":"text","text":"Async agent launched successfully. agentId: adeadbeef012345678"}]}]}}'
+  $agUse='{"type":"assistant","timestamp":"'+$ts+'","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_AG1","name":"Agent","input":{}}]}}'
+  $stop='{"type":"assistant","timestamp":"'+$ts+'","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ST1","name":"TaskStop","input":{"task_id":"adeadbeef012345678"}}]}}'
+  [IO.File]::WriteAllText($tp, ($agUse+"`n"+$agLaunch+"`n"), $u8)
+  $script:bgState=@{}; $st1=BgScanN $sid $tp
+  if($st1.pending.Count -eq 1){ Grn "N tracks a live agent launch (pending=1)" } else { Red "N did not track an agent launch (pending=$($st1.pending.Count))" }
+  [IO.File]::WriteAllText($tp, ($agUse+"`n"+$agLaunch+"`n"+$stop+"`n"), $u8)
+  $script:bgState=@{}; $st2=BgScanN $sid $tp
+  if($st2.pending.Count -eq 0){ Grn "N clears on TaskStop (no <task-notification>)" } else { Red "N stuck pending after TaskStop -- the false-positive regression" }
+  # N must NOT track background Bash (that is B's job; N-tracked bash goes stale on TaskStop/miss)
+  $bashUse='{"type":"assistant","timestamp":"'+$ts+'","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_BS1","name":"Bash","input":{"run_in_background":true}}]}}'
+  $bashRes='{"type":"user","timestamp":"'+$ts+'","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_BS1","content":[{"type":"text","text":"Command running in background with ID: bdeadbeef1"}]}]}}'
+  [IO.File]::WriteAllText($tp, ($bashUse+"`n"+$bashRes+"`n"), $u8)
+  $script:bgState=@{}; $st3=BgScanN $sid $tp
+  if($st3.pending.Count -eq 0){ Grn "N does NOT track background bash (left to B)" } else { Red "N tracked a bash launch (should be B-only): pending=$($st3.pending.Count)" }
 } finally { if($fs){ try{$fs.Close()}catch{} }; Remove-Item $tmp -Recurse -Force -EA SilentlyContinue }
 
 # ---- static never-lie + wiring asserts on the resident text ----

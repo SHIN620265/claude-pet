@@ -499,8 +499,10 @@ function BgScanN($sid, $tp) {
         if (@('running','started','resumed','in_progress') -notcontains $sta) { [void]$st.pending.Remove($tid) }
       }
     }
-    $mayL = ($line.Contains('"type":"tool_use"') -and ($line.Contains('"name":"Agent"') -or $line.Contains('"name":"SendMessage"') -or $line.Contains('run_in_background')))
-    $mayR = ($line.Contains('"type":"tool_result"') -and ($line.Contains('agentId:') -or $line.Contains('background with ID')))
+    # a task terminated by the TaskStop tool emits no <task-notification>, only "Successfully stopped task: X"
+    if ($line.Contains('Successfully stopped task:') -and ($line -match 'Successfully stopped task:\s*([0-9a-z]{6,})')) { [void]$st.pending.Remove($Matches[1]) }
+    $mayL = ($line.Contains('"type":"tool_use"') -and ($line.Contains('"name":"Agent"') -or $line.Contains('"name":"SendMessage"') -or $line.Contains('"name":"TaskStop"')))
+    $mayR = ($line.Contains('"type":"tool_result"') -and $line.Contains('agentId:'))
     if (-not ($mayL -or $mayR)) { continue }
     $obj = $null; try { $obj = $line | ConvertFrom-Json } catch { continue }
     $ts = 0L; if ($line -match '"timestamp":"([^"]+)"') { try { $ts = [DateTimeOffset]::Parse($Matches[1]).ToUnixTimeMilliseconds() } catch {} }
@@ -508,7 +510,11 @@ function BgScanN($sid, $tp) {
     foreach ($blk in $content) {
       if ($blk.type -eq 'tool_use') {
         $nm = "$($blk.name)"
-        if (($nm -eq 'Agent') -or ($nm -eq 'SendMessage') -or (($nm -eq 'Bash' -or $nm -eq 'PowerShell') -and $blk.input.run_in_background)) { $st.launchIds[$blk.id] = $true }
+        # N tracks AGENTS only (agents leave no file handle, so N is their only signal). Background
+        # Bash is handled entirely by the B handle-probe, whose release covers every way a bash ends
+        # (natural finish, TaskStop, crash) -- so N never tracks bash and can't go stale on it.
+        if (($nm -eq 'Agent') -or ($nm -eq 'SendMessage')) { $st.launchIds[$blk.id] = $true }
+        elseif ($nm -eq 'TaskStop') { $tt = "$($blk.input.task_id)"; if ($tt) { [void]$st.pending.Remove($tt) } }
       } elseif ($blk.type -eq 'tool_result') {
         if ($st.launchIds.ContainsKey($blk.tool_use_id)) {
           $rt = if ($blk.content -is [System.Array]) { ($blk.content | ForEach-Object { $_.text }) -join "`n" } else { "$($blk.content)" }
