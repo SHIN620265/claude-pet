@@ -452,7 +452,13 @@ function Test-Interrupted($tp) {
   } catch { return $false }
   $last = ''
   foreach ($ln in ($text -split "`n")) { $t = $ln.Trim(); if ($t) { $last = $t } }
-  return ($last -match '"interruptedMessageId"')
+  if ($last -notmatch '"interruptedMessageId"') { return 0L }
+  # return the interrupt's timestamp (ms) so the caller can ignore an OLD interrupt: after a new
+  # prompt the card is 'thinking' again but this mark is briefly still the last durable entry --
+  # only a mark at/after the current thinking epoch means "interrupted THIS turn".
+  $its = 0L; if ($last -match '"timestamp":"([^"]+)"') { try { $its = [DateTimeOffset]::Parse($Matches[1]).ToUnixTimeMilliseconds() } catch {} }
+  if ($its -le 0) { $its = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }   # mark present but ts unparseable -> treat as now (flip, don't miss a real interrupt)
+  return $its
 }
 
 # ---- background-running detection (B+N dual signal); see docs/background-running-awareness-design.md ----
@@ -1346,12 +1352,18 @@ $tick.add_Tick({
       if ($p[0] -ne 'thinking') { continue }   # re-read: the row cache can lag a real state change
       $tpI = ''; if ($p.Count -ge 9) { $tpI = $p[8] }
       if (-not $tpI) { continue }
-      if (Test-Interrupted $tpI) {
-        while ($p.Count -lt 9) { $p += '' }
-        $p[0] = 'interrupted'; $p[1] = L 'interrupted' 'interrupted'; $p[4] = "$(& $nowMs)"
-        WU $sess ($p -join "`t")
-        $script:fsDirty = $true
-        LogEv ('interrupt->interrupted sid={0}' -f $sid)
+      $its = Test-Interrupted $tpI
+      if ($its -gt 0) {
+        # only if the interrupt is at/after THIS thinking started -- a mark older than the
+        # thinking epoch is a prior interrupt already superseded by a new prompt (do not re-flip).
+        $tep = 0L; if ($p.Count -ge 5) { [long]::TryParse($p[4], [ref]$tep) | Out-Null }
+        if ($its -ge $tep) {
+          while ($p.Count -lt 9) { $p += '' }
+          $p[0] = 'interrupted'; $p[1] = L 'interrupted' 'interrupted'; $p[4] = "$(& $nowMs)"
+          WU $sess ($p -join "`t")
+          $script:fsDirty = $true
+          LogEv ('interrupt->interrupted sid={0}' -f $sid)
+        }
       }
     }
   }
