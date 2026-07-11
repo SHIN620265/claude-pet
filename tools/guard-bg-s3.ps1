@@ -44,7 +44,7 @@ $btx = (Def 'Build-TipBitmap').Extent.Text
 if($btx -notmatch 'Get-BgStatusLabel'){ Grn "tooltip status is generic, not the compact 'bg: X +N' (no redundancy with the list)" } else { Red "tooltip repeats the compact bg label (redundant)" }
 if(($btx -match "L 'bgRunning'") -and ($btx -match '@\(\$s\.bgWhat\)\.Count')){ Grn "tooltip status = generic Background running (+count when >1)" } else { Red "tooltip status not generic-with-count" }
 # detail must be its OWN block/line, not "·"-joined to the metadata (content carries its own punctuation)
-if($btx -match 'text=\$s\.detail'){ Grn "tooltip: detail is its own line/block (not middot-joined)" } else { Red "tooltip detail still inline-joined to metadata" }
+if($btx -match 'text=\(Fmt-Detail \$s\)'){ Grn "tooltip: detail is its own line/block (via Fmt-Detail, author-marked)" } else { Red "tooltip detail block not wired to Fmt-Detail" }
 # the tooltip shows the conversation ONLY where the CARD does (thinking/attention); a bg tooltip is
 # purely the running list (no conversation) -> card & tooltip content stay in lockstep, no divergence
 if($btx -match "\`$s\.detail -and \(\`$s\.key -eq 'thinking' -or \`$s\.key -eq 'attention'"){ Grn "tooltip: conversation gated on thinking/attention (mirrors the card B+)" } else { Red "tooltip conversation not gated -> bg tooltip would re-show the noisy done detail" }

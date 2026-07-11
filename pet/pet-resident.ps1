@@ -336,7 +336,7 @@ function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow, $hoverIcon)
     $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
     $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }
     $parts += $(if ($s.key -eq 'done' -and $s.bg) { Get-BgStatusLabel $s } else { L $ek $s.label })
-    if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { $parts += $s.detail }   # B+: card shows the snippet only where it's YOUR input (prompt/ask); Claude's done-reply first line is noise
+    if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { $parts += (Fmt-Detail $s) }   # B+: snippet only on input-side states; Fmt-Detail marks Claude-authored carries with a "Claude:" prefix
     $stat = ($parts -join $sep)
     $col = $stateColors[$ek]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
     $brS = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, $col.R, $col.G, $col.B))
@@ -424,6 +424,14 @@ function Get-BgStatusLabel($s) {
   $pfx = L 'bgPrefix' 'bg'
   if ($what.Count -eq 1) { return ($pfx + ': ' + $named[0].label) }
   return ($pfx + '(' + $what.Count + '): ' + $named[0].label + ' +' + ($what.Count - 1))
+}
+# the shown snippet can be YOUR prompt or CLAUDE's reply (a done->busy carry brings the reply into a
+# thinking card). Author is field 11 (from pet-event). Mark only the exception -- Claude's words get a
+# "Claude:" prefix; your prompt stays unmarked (the default). Same in card + tooltip, so they agree.
+function Fmt-Detail($s) {
+  if (-not $s.detail) { return '' }
+  if ($s.detailAuthor -eq 'claude') { return 'Claude: ' + $s.detail }
+  return $s.detail
 }
 Load-Strings
 $sv = ((RU (Join-Path $root 'sound.txt')) + '').Trim().ToLower(); $script:soundOn = ($sv -ne 'off')
@@ -1137,7 +1145,7 @@ function Build-TipBitmap($s, $contentW, $maxH, $sc) {
     # tooltip is purely "what's running" (the card's headline expanded) -- no conversation, so card and
     # tooltip content stay in lockstep. Its own line, primary-dark (its own punctuation shouldn't collide
     # with a "middot" separator).
-    if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { [void]$blocks.Add(@{ text=$s.detail; font=$fBody; color=[System.Drawing.Color]::FromArgb(255,64,64,72) }) }
+    if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { [void]$blocks.Add(@{ text=(Fmt-Detail $s); font=$fBody; color=[System.Drawing.Color]::FromArgb(255,64,64,72) }) }
     if ($s.key -eq 'done' -and $s.bg -and -not $script:privacy) {   # the running list = the bg card's headline expanded (privacy off only, R7)
       foreach ($it in @($s.bgWhat)) {
         $lab = $(if ($it.label) { $it.label } else { ('(' + $it.kind + ' ' + (("$($it.id)").Substring(0,[Math]::Min(6,("$($it.id)").Length))) + ')') })
@@ -1311,7 +1319,7 @@ function Update-Card {
     $bgr = ($p[0] -eq 'done' -and $script:bgSids.Contains($f.Name))
     $bgWhatL = $(if ($bgr) { @(Get-BgWhat $f.Name) } else { @() })
     $bgGenL = $(if ($bgr -and $script:bgGen.ContainsKey($f.Name)) { $script:bgGen[$f.Name] } else { 0 })
-    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$ttl; detail=$dtl; epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}); bg=$bgr; bgWhat=$bgWhatL; bgGen=$bgGenL }
+    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$ttl; detail=$dtl; detailAuthor=$(if($p.Count -ge 11){$p[10]}else{''}); epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}); bg=$bgr; bgWhat=$bgWhatL; bgGen=$bgGenL }
   }
   # minimal hybrid: float 'attention' (needs you) to the top; everything else stays newest-first
   $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true})
@@ -1336,7 +1344,7 @@ function Update-Card {
     return
   }
 
-  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)|$($_.cpid)|$($_.bg)|$($_.bgGen)" }) -join '##') + "|ov=$overflow"
+  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.detailAuthor)|$($_.model)|$($_.cpid)|$($_.bg)|$($_.bgGen)" }) -join '##') + "|ov=$overflow"
   if ($sig -ne $script:lastContentSig) { $script:tipContentGen++; $script:lastContentSig = $sig }   # card content changed -> invalidate any shown tooltip (D10)
   if ($script:layered) {
     # layered path: rebuild the cached shadow+static layers on any content/hover/selection
@@ -1371,7 +1379,7 @@ function Update-Card {
         # status line: [model badge, post-turn states only] . state . detail
         # mid-turn (thinking/attention) the badge would read as "the model currently
         # running", which we cannot truthfully know -- so it only renders on done/idle
-        $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += $lab; if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { $parts += $s.detail }   # B+: snippet only on input-side states
+        $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += $lab; if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { $parts += (Fmt-Detail $s) }   # B+: snippet only on input-side states; Fmt-Detail marks Claude carries
         $rowState[$i].Text = ($parts -join "  $([char]0x00B7)  ")
         $col = $stateColors[$ek]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
         $rowState[$i].ForeColor = $col

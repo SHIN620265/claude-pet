@@ -38,6 +38,7 @@ function ExistingModel { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Co
 function ExistingPid { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 7) { return $p[6] } } return '' }
 function ExistingTp  { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 9) { return $p[8] } } return '' }
 function ExistingCwd { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 10) { return $p[9] } } return '' }
+function ExistingAuthor { $c = RU $file; if ($c) { $p = $c -split "`t"; if ($p.Count -ge 11) { return $p[10] } } return '' }   # field 11: who wrote $detail
 
 # scrub every control char (incl. TAB/CR/LF/ESC/BEL) so a value can never corrupt the
 # single-line TAB-separated record; cap length so a pathological title can't bloat it
@@ -113,8 +114,12 @@ $tp = ''; if ($j) { $tp = [string]$j.transcript_path }
 $mdl = ModelFromTranscript $tp
 if (-not $mdl) { $mdl = ExistingModel }   # events without transcript_path keep the badge
 
-function WriteSession($key, $label, $title, $detail, $model) {
+function WriteSession($key, $label, $title, $detail, $model, $detailAuthor) {
   if (-not $model) { $model = $mdl }
+  # field 11 = author of $detail ('user' = your prompt, 'claude' = the reply). Callers that carry an
+  # existing detail don't pass it -> it stays whatever wrote that detail (so a done->busy carry keeps
+  # 'claude', a fresh prompt sets 'user'). Only 'prompt' and 'done'(with a reply) set it explicitly.
+  if ($null -eq $detailAuthor) { $detailAuthor = ExistingAuthor }
   $cp = "$cpid"; if ($cpid -le 0) { $cp = ExistingPid }   # one flaky capture must not wipe a good pid
   # field 8 = unused placeholder (WT tab-level jump was removed; WT jumps are window-level
   # only, VS Code stays tab-level via the companion handshake). Kept empty so field 9
@@ -127,7 +132,7 @@ function WriteSession($key, $label, $title, $detail, $model) {
   # jump to, since all windows share one Code.exe and MainWindowHandle can't tell them apart)
   $cwdF = CleanRec $cwd; if (-not $cwdF) { $cwdF = ExistingCwd }
   $epoch = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-  $rec = ($key, $label, $title, $detail, "$epoch", $model, $cp, $fp, $tpF, $cwdF) -join "`t"
+  $rec = ($key, $label, $title, $detail, "$epoch", $model, $cp, $fp, $tpF, $cwdF, $detailAuthor) -join "`t"
   [IO.File]::WriteAllText($file, $rec, (New-Object Text.UTF8Encoding($false)))
 }
 $projOr = $proj   # may be empty; the resident localizes an empty title to "new session"
@@ -165,7 +170,7 @@ switch ($Event) {
       else { $title = $projOr }
     }
     Remove-Item $collapse -Force -ErrorAction SilentlyContinue
-    WriteSession 'thinking' '正在思考' $title $clean
+    WriteSession 'thinking' '正在思考' $title $clean $null 'user'
   }
   'attention' {
     $msg = ''; if ($j) { $msg = [string]$j.message }
@@ -225,7 +230,7 @@ switch ($Event) {
     # turn is over -> swap "your words" for the reply's first line, badge from the same
     # entry; on extraction failure fall back to the v1.0.6 behavior (no regression)
     $r = LastReplyFromTranscript $tp
-    if ($r -and $r.text) { WriteSession 'done' '已完成' (TitleOr) $r.text $r.model }
+    if ($r -and $r.text) { WriteSession 'done' '已完成' (TitleOr) $r.text $r.model 'claude' }
     else { WriteSession 'done' '已完成' (TitleOr) (ExistingDetail) }
   }
   'busy' {
