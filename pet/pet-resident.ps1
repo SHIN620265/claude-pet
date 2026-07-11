@@ -336,7 +336,7 @@ function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow, $hoverIcon)
     $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
     $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }
     $parts += $(if ($s.key -eq 'done' -and $s.bg) { Get-BgStatusLabel $s } else { L $ek $s.label })
-    if ($s.detail) { $parts += $s.detail }
+    if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { $parts += $s.detail }   # B+: card shows the snippet only where it's YOUR input (prompt/ask); Claude's done-reply first line is noise
     $stat = ($parts -join $sep)
     $col = $stateColors[$ek]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
     $brS = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, $col.R, $col.G, $col.B))
@@ -1127,15 +1127,21 @@ function Build-TipBitmap($s, $contentW, $maxH, $sc) {
     $titleTxt = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
     [void]$blocks.Add(@{ text=$titleTxt; font=$fTitle; color=[System.Drawing.Color]::FromArgb(255,45,45,50) })
     $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
-    $parts=@(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }
-    $parts += $(if ($s.key -eq 'done' -and $s.bg) { Get-BgStatusLabel $s } else { L $ek $s.label })
-    if ($s.detail) { $parts += $s.detail }
+    # metadata ROW = model + state ONLY (short chrome; a middot reads fine between two short tokens). Generic
+    # state (+count) for bg; the running specifics live in the list below (no redundant compact label).
+    $meta=@(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $meta += $s.model }
+    $meta += $(if ($s.key -eq 'done' -and $s.bg) { $n2 = @($s.bgWhat).Count; (L 'bgRunning' $s.label) + $(if (-not $script:privacy -and $n2 -gt 1) { ' (' + $n2 + ')' } else { '' }) } else { L $ek $s.label })
     $sc0 = $stateColors[$ek]; if (-not $sc0) { $sc0 = [System.Drawing.Color]::FromArgb(90,90,95) }
-    [void]$blocks.Add(@{ text=($parts -join ('  ' + [string][char]0x00B7 + '  ')); font=$fBody; color=[System.Drawing.Color]::FromArgb(255,$sc0.R,$sc0.G,$sc0.B) })
-    if ($s.key -eq 'done' -and $s.bg -and -not $script:privacy) {   # full running list (privacy off only, R7)
+    [void]$blocks.Add(@{ text=($meta -join ('  ' + [string][char]0x00B7 + '  ')); font=$fBody; color=[System.Drawing.Color]::FromArgb(255,$sc0.R,$sc0.G,$sc0.B) })
+    # conversation content: shown ONLY where the CARD shows it (thinking/attention = YOUR input). A bg
+    # tooltip is purely "what's running" (the card's headline expanded) -- no conversation, so card and
+    # tooltip content stay in lockstep. Its own line, primary-dark (its own punctuation shouldn't collide
+    # with a "middot" separator).
+    if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { [void]$blocks.Add(@{ text=$s.detail; font=$fBody; color=[System.Drawing.Color]::FromArgb(255,64,64,72) }) }
+    if ($s.key -eq 'done' -and $s.bg -and -not $script:privacy) {   # the running list = the bg card's headline expanded (privacy off only, R7)
       foreach ($it in @($s.bgWhat)) {
         $lab = $(if ($it.label) { $it.label } else { ('(' + $it.kind + ' ' + (("$($it.id)").Substring(0,[Math]::Min(6,("$($it.id)").Length))) + ')') })
-        [void]$blocks.Add(@{ text=([string][char]0x2022 + ' ' + $lab); font=$fBody; color=[System.Drawing.Color]::FromArgb(255,90,90,95) })
+        [void]$blocks.Add(@{ text=([string][char]0x2022 + ' ' + $lab); font=$fBody; color=[System.Drawing.Color]::FromArgb(255,72,72,80) })   # readable = the bg tooltip's main content
       }
     }
     $scratch = New-Object System.Drawing.Bitmap(1,1)
@@ -1365,7 +1371,7 @@ function Update-Card {
         # status line: [model badge, post-turn states only] . state . detail
         # mid-turn (thinking/attention) the badge would read as "the model currently
         # running", which we cannot truthfully know -- so it only renders on done/idle
-        $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += $lab; if ($s.detail) { $parts += $s.detail }
+        $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += $lab; if ($s.detail -and ($s.key -eq 'thinking' -or $s.key -eq 'attention')) { $parts += $s.detail }   # B+: snippet only on input-side states
         $rowState[$i].Text = ($parts -join "  $([char]0x00B7)  ")
         $col = $stateColors[$ek]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
         $rowState[$i].ForeColor = $col

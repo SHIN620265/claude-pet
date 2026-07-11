@@ -61,6 +61,9 @@ $raw = [IO.File]::ReadAllText($RES)
 # both render paths must route bg rows through Get-BgStatusLabel (layered Build-CardStatic + Region)
 $calls = ([regex]::Matches($raw, 'Get-BgStatusLabel \$s')).Count
 if($calls -ge 2){ Grn "both render paths call Get-BgStatusLabel ($calls sites)" } else { Red "Get-BgStatusLabel wired in <2 render paths ($calls)" }
+# B+: the CARD shows the conversation snippet ONLY on input-side states (thinking/attention); done/idle drop the noisy Claude first line
+$bp = ([regex]::Matches($raw, "\`$s\.detail -and \(\`$s\.key -eq 'thinking' -or \`$s\.key -eq 'attention'")).Count
+if($bp -ge 2){ Grn "B+: both card paths gate the detail snippet on thinking/attention ($bp sites)" } else { Red "B+ detail gate missing in a card path ($bp)" }
 if($raw -match 'bgWhat=\$bgWhatL' -or $raw -match 'bgWhat=\$\(') { Grn "wired: bgWhat on the list item" } else { Red "bgWhat not attached to the list item" }
 if($raw -match 'bgGen=\$bgGenL' -or $raw -match 'bgGen=') { Grn "wired: bgGen on the list item" } else { Red "bgGen not attached" }
 if($raw -match '\|\$\(\$_\.bgGen\)') { Grn "wired: \$sig includes bgGen (re-render on evidence change)" } else { Red "\$sig missing bgGen fingerprint" }

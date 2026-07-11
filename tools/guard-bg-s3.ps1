@@ -38,6 +38,17 @@ if($raw -match 'Update-Tip \$hr \$hi'){ Grn "Update-Tip wired into the tick" } e
 if($raw -match '\$script:tipWin = New-Object LTipWin'){ Grn "tipWin created" } else { Red "tipWin not created" }
 if($raw -match '\$script:tipWin\)\s*\{\s*\$script:tipWin\.Dispose'){ Grn "tipWin disposed at shutdown (F13)" } else { Red "tipWin not disposed" }
 if($raw -match '\$script:rowTrunc\[\$i\] = '){ Grn "rowTrunc populated in Build-CardStatic (F11)" } else { Red "rowTrunc not populated" }
+# progressive disclosure: the tooltip status shows the generic STATE (+count), NOT the compact card
+# label "bg: X +N" -- otherwise the first task is repeated (inline AND in the list below)
+$btx = (Def 'Build-TipBitmap').Extent.Text
+if($btx -notmatch 'Get-BgStatusLabel'){ Grn "tooltip status is generic, not the compact 'bg: X +N' (no redundancy with the list)" } else { Red "tooltip repeats the compact bg label (redundant)" }
+if(($btx -match "L 'bgRunning'") -and ($btx -match '@\(\$s\.bgWhat\)\.Count')){ Grn "tooltip status = generic Background running (+count when >1)" } else { Red "tooltip status not generic-with-count" }
+# detail must be its OWN block/line, not "·"-joined to the metadata (content carries its own punctuation)
+if($btx -match 'text=\$s\.detail'){ Grn "tooltip: detail is its own line/block (not middot-joined)" } else { Red "tooltip detail still inline-joined to metadata" }
+# the tooltip shows the conversation ONLY where the CARD does (thinking/attention); a bg tooltip is
+# purely the running list (no conversation) -> card & tooltip content stay in lockstep, no divergence
+if($btx -match "\`$s\.detail -and \(\`$s\.key -eq 'thinking' -or \`$s\.key -eq 'attention'"){ Grn "tooltip: conversation gated on thinking/attention (mirrors the card B+)" } else { Red "tooltip conversation not gated -> bg tooltip would re-show the noisy done detail" }
+if($btx -notmatch 'divider=\$true'){ Grn "tooltip: no divider (bg tooltip is a clean running list, nothing to separate)" } else { Red "stale divider block still present" }
 
 # ---- behavioral: Build-TipBitmap ----
 foreach($fn in 'L','Get-BgStatusLabel','Get-RoundPath','Build-TipBitmap','Update-Tip'){ Invoke-Expression (Def $fn).Extent.Text }
