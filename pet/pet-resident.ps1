@@ -58,6 +58,22 @@ public class LCardWin : Form {
         base.WndProc(ref m);
     }
 }
+// hover tooltip window (S3): childless layered NOACTIVATE + WS_EX_TRANSPARENT so mouse events pass
+// THROUGH to whatever is beneath (WindowFromPoint falls through) -- this is what keeps the tooltip
+// from ever becoming the top window under the cursor and triggering a hover/hide flicker loop.
+// Output-only: it never receives input, WndProc returns HTTRANSPARENT for every WM_NCHITTEST.
+public class LTipWin : Form {
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+        get { CreateParams cp = base.CreateParams;
+            cp.ExStyle |= 0x00080000; cp.ExStyle |= 0x00000008; cp.ExStyle |= 0x00000080; cp.ExStyle |= 0x08000000; cp.ExStyle |= 0x00000020;
+            return cp; }   // LAYERED | TOPMOST | TOOLWINDOW | NOACTIVATE | TRANSPARENT
+    }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x0084) { m.Result = (IntPtr)(-1); return; }   // WM_NCHITTEST -> HTTRANSPARENT (never a click target)
+        base.WndProc(ref m);
+    }
+}
 public static class Lp {
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr v);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
@@ -302,6 +318,7 @@ function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow, $hoverIcon)
   $brTitle = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,45,45,50))
   $brDim = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,216,216,220))
   $sep = '  ' + [string][char]0x00B7 + '  '
+  for ($z = 0; $z -lt $script:rowTrunc.Length; $z++) { $script:rowTrunc[$z] = $false }   # tooltip eligibility (F11): was this row's title/status ellipsized?
   for ($i = 0; $i -lt $rows; $i++) {
     $s = $list[$i]; $y = $gm.pad + $i*($gm.rowH + $gm.rowGap)
     $lit = ($i -eq $hoverRow -or $i -eq $selRow)
@@ -314,14 +331,19 @@ function Build-CardStatic($list, $gm, $hoverRow, $selRow, $overflow, $hoverIcon)
     }
     $title = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
     $titleMax = $gm.cardW - 2*$gm.m - [int](38*$gm.scale)
-    $g.DrawString((Fit-Text $g $title $fTitle $titleMax), $fTitle, $brTitle, [single]($gm.pad + $gm.m), [single]($y + [int](6*$gm.scale)))
+    $fitT = Fit-Text $g $title $fTitle $titleMax
+    $g.DrawString($fitT, $fTitle, $brTitle, [single]($gm.pad + $gm.m), [single]($y + [int](6*$gm.scale)))
     $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
-    $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }; $parts += (L $ek $s.label); if ($s.detail) { $parts += $s.detail }
+    $parts = @(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }
+    $parts += $(if ($s.key -eq 'done' -and $s.bg) { Get-BgStatusLabel $s } else { L $ek $s.label })
+    if ($s.detail) { $parts += $s.detail }
     $stat = ($parts -join $sep)
     $col = $stateColors[$ek]; if (-not $col) { $col = [System.Drawing.Color]::FromArgb(90,90,95) }
     $brS = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, $col.R, $col.G, $col.B))
     $statMax = $gm.cardW - 2*$gm.m - [int](22*$gm.scale); if ($overflow -gt 0 -and $i -eq ($rows-1)) { $statMax -= [int](30*$gm.scale) }
-    $g.DrawString((Fit-Text $g $stat $fStat $statMax), $fStat, $brS, [single]($gm.pad + $gm.m), [single]($y + [int](27*$gm.scale))); $brS.Dispose()
+    $fitS = Fit-Text $g $stat $fStat $statMax
+    $g.DrawString($fitS, $fStat, $brS, [single]($gm.pad + $gm.m), [single]($y + [int](27*$gm.scale))); $brS.Dispose()
+    if ($i -lt $script:rowTrunc.Length) { $script:rowTrunc[$i] = (($fitT -ne $title) -or ($fitS -ne $stat)) }
     $chips = Get-IconChips $gm $y
     $rowHover = ($i -eq $hoverRow)
     if ($rowHover -and $hoverIcon -eq 1) {
@@ -389,6 +411,19 @@ function Load-Strings {
 function L($key, $fallback) {
   if ($script:STR -and ($script:STR.PSObject.Properties.Name -contains $key)) { return $script:STR.$key }
   return $fallback
+}
+# render-time bg statusline label (D9/G4): computed HERE, never precomputed in the tick, so it always
+# reflects the CURRENT privacy state and count. Privacy on -> generic label only, never command text.
+# Falls back to the generic "background running" when no running item has a resolvable name (R4/R10),
+# so it can never render a bare "bg: " with no content. Pure-ASCII punctuation; the prefix is data.
+function Get-BgStatusLabel($s) {
+  if ($script:privacy) { return (L 'bgRunning' $s.label) }
+  $what = @($s.bgWhat)
+  $named = @($what | Where-Object { $_.label })
+  if ($named.Count -eq 0) { return (L 'bgRunning' $s.label) }
+  $pfx = L 'bgPrefix' 'bg'
+  if ($what.Count -eq 1) { return ($pfx + ': ' + $named[0].label) }
+  return ($pfx + '(' + $what.Count + '): ' + $named[0].label + ' +' + ($what.Count - 1))
 }
 Load-Strings
 $sv = ((RU (Join-Path $root 'sound.txt')) + '').Trim().ToLower(); $script:soundOn = ($sv -ne 'off')
@@ -483,17 +518,40 @@ function BgHeld($path) {
   try { $fs = [IO.File]::Open($path, 'Open', 'Read', 'None'); $fs.Close(); return $false }
   catch [System.IO.IOException] { return $true } catch { return $false }
 }
-function BgTaskId($txt) {
+function BgAgentId($txt) {   # agentId ONLY (G2): the N/pending path must never grab a bg-bash ID
   if ($txt -match 'agentId:\s*([0-9a-f]{10,})') { return $Matches[1] }
+  return $null
+}
+function BgBashId($txt) {    # background-bash ID ONLY (display-desc path)
   if ($txt -match 'background with ID:\s*([0-9a-z]{6,})') { return $Matches[1] }
   return $null
 }
+# label for a background job = the LAUNCHED JOB SPEC, never "the subcommand currently executing"
+# (G5/F6): a compound "a && b" is shown WHOLE (truthful); a cherry-picked trailing segment would lie
+# ("npm start && echo done" must not read as "echo done"). description first; else the whole command
+# (only a quote/nesting/$()-free leading env/cd preamble may be stripped); else '' -> UI degrades to
+# generic. Pure-ASCII: ellipsis via char code, not a literal.
+function Clean-BgLabel($desc, $cmd) {
+  $s = ("$desc").Trim()
+  if (-not $s) {
+    $c = ("$cmd").Trim()
+    if ($c -and ($c -notmatch '["'']') -and ($c -notmatch '\$\(') -and ($c -notmatch '\x60')) {
+      while ($c -match '^\s*(\$env:\w+=\S+|set\s+\w+=\S+|cd\s+\S+|Set-Location\s+\S+)\s*(;|&&)\s+\S') {
+        $c = ($c -replace '^\s*(\$env:\w+=\S+|set\s+\w+=\S+|cd\s+\S+|Set-Location\s+\S+)\s*(;|&&)\s*', '')
+      }
+      $s = $c
+    } elseif ($c) { $s = $c }
+  }
+  $s = ($s -replace '\s+', ' ').Trim()
+  if ($s.Length -gt 64) { $s = $s.Substring(0, 63) + [string][char]0x2026 }
+  return $s
+}
 function BgScanN($sid, $tp) {
-  if (-not $script:bgState.ContainsKey($sid)) { $script:bgState[$sid] = @{ off = 0L; frag = ''; launchIds = @{}; pending = @{}; known = @{} } }
+  if (-not $script:bgState.ContainsKey($sid)) { $script:bgState[$sid] = @{ off = 0L; frag = ''; launchIds = @{}; pending = @{}; known = @{}; launchDesc = @{}; desc = @{} } }
   $st = $script:bgState[$sid]
   $fi = $null; try { $fi = Get-Item $tp -ErrorAction Stop } catch { return $st }
   $size = $fi.Length
-  if ($size -lt $st.off) { $st.off = 0L; $st.frag = ''; $st.launchIds = @{}; $st.pending = @{}; $st.known = @{} }
+  if ($size -lt $st.off) { $st.off = 0L; $st.frag = ''; $st.launchIds = @{}; $st.pending = @{}; $st.known = @{}; $st.launchDesc = @{}; $st.desc = @{} }
   if ($size -le $st.off) { return $st }
   $bytes = $null; $fs = $null
   try {
@@ -514,8 +572,8 @@ function BgScanN($sid, $tp) {
     }
     # a task terminated by the TaskStop tool emits no <task-notification>, only "Successfully stopped task: X"
     if ($line.Contains('Successfully stopped task:') -and ($line -match 'Successfully stopped task:\s*([0-9a-z]{6,})')) { [void]$st.pending.Remove($Matches[1]) }
-    $mayL = ($line.Contains('"type":"tool_use"') -and ($line.Contains('"name":"Agent"') -or $line.Contains('"name":"SendMessage"') -or $line.Contains('"name":"TaskStop"')))
-    $mayR = ($line.Contains('"type":"tool_result"') -and $line.Contains('agentId:'))
+    $mayL = ($line.Contains('"type":"tool_use"') -and ($line.Contains('"name":"Agent"') -or $line.Contains('"name":"SendMessage"') -or $line.Contains('"name":"TaskStop"') -or ($line.Contains('"run_in_background":true') -and ($line.Contains('"name":"Bash"') -or $line.Contains('"name":"PowerShell"')))))
+    $mayR = ($line.Contains('"type":"tool_result"') -and ($line.Contains('agentId:') -or $line.Contains('Command running in background with ID:')))
     if (-not ($mayL -or $mayR)) { continue }
     $obj = $null; try { $obj = $line | ConvertFrom-Json } catch { continue }
     $ts = 0L; if ($line -match '"timestamp":"([^"]+)"') { try { $ts = [DateTimeOffset]::Parse($Matches[1]).ToUnixTimeMilliseconds() } catch {} }
@@ -523,32 +581,82 @@ function BgScanN($sid, $tp) {
     foreach ($blk in $content) {
       if ($blk.type -eq 'tool_use') {
         $nm = "$($blk.name)"
-        # N tracks AGENTS only (agents leave no file handle, so N is their only signal). Background
-        # Bash is handled entirely by the B handle-probe, whose release covers every way a bash ends
-        # (natural finish, TaskStop, crash) -- so N never tracks bash and can't go stale on it.
-        if (($nm -eq 'Agent') -or ($nm -eq 'SendMessage')) { $st.launchIds[$blk.id] = $true }
+        # N tracks AGENTS only for the RUN decision (agents leave no file handle, so N is their only
+        # signal). Background Bash's RUN state is handled entirely by the B handle-probe, whose release
+        # covers every way a bash ends -- so bash never enters launchIds/pending/known and can't go
+        # stale on it. launchDesc is a SEPARATE display-only ledger (F5/G2): capturing a bash label
+        # here must NOT make it an N candidate.
+        if (($nm -eq 'Agent') -or ($nm -eq 'SendMessage')) {
+          $st.launchIds[$blk.id] = $true
+          $lab = Clean-BgLabel $blk.input.description $null
+          if (-not $lab -and $blk.input.subagent_type) { $lab = Clean-BgLabel $blk.input.subagent_type $null }
+          $st.launchDesc[$blk.id] = @{ kind = 'agent'; label = $lab }
+        }
         elseif ($nm -eq 'TaskStop') { $tt = "$($blk.input.task_id)"; if ($tt) { [void]$st.pending.Remove($tt) } }
+        elseif ((($nm -eq 'Bash') -or ($nm -eq 'PowerShell')) -and ($blk.input.run_in_background -eq $true)) {
+          $st.launchDesc[$blk.id] = @{ kind = 'shell'; label = (Clean-BgLabel $blk.input.description $blk.input.command) }   # NOT added to launchIds
+        }
       } elseif ($blk.type -eq 'tool_result') {
+        $rt = if ($blk.content -is [System.Array]) { ($blk.content | ForEach-Object { $_.text }) -join "`n" } else { "$($blk.content)" }
         if ($st.launchIds.ContainsKey($blk.tool_use_id)) {
-          $rt = if ($blk.content -is [System.Array]) { ($blk.content | ForEach-Object { $_.text }) -join "`n" } else { "$($blk.content)" }
-          $tid = BgTaskId $rt
-          if ($tid) { $st.pending[$tid] = $ts; $st.known[$tid] = $true }
+          # AGENT branch (G2): agentId-ONLY matcher, so a stray "background with ID:" phrase in an
+          # agent result can never route a bash ID into pending.
+          $tid = BgAgentId $rt
+          if ($tid) {
+            $st.pending[$tid] = $ts; $st.known[$tid] = $true
+            $ld = $st.launchDesc[$blk.tool_use_id]; if ($ld) { $st.desc[$tid] = $ld.label }
+          }
+        } elseif ($st.launchDesc.ContainsKey($blk.tool_use_id) -and ($st.launchDesc[$blk.tool_use_id].kind -eq 'shell')) {
+          # SHELL branch (display-only): writes ONLY desc; never touches launchIds/pending/known.
+          $bid = BgBashId $rt
+          if ($bid) { $st.desc[$bid] = $st.launchDesc[$blk.tool_use_id].label }
         }
       }
     }
   }
   return $st
 }
-function BgRunning($sid, $tp, $claudePid, $nowMs) {
-  if (-not $tp) { return $false }   # old 7-field record has no transcript -> honest degrade, no overlay
+# ONE observation (single enumerate + one probe per file) yields BOTH the boolean AND the "what is
+# running" evidence, so they can never disagree (G1/D8). Returns @{ running=[bool]; evidence=@(items) }
+# where each item is a [pscustomobject]@{ kind; id; label } (F7). Caller-owned result: writes no
+# $script: map except the shape-drift ledger (per-pass latency state). BgRunning is a thin wrapper so
+# the guarded boolean stays byte-identical.
+function Get-BgObservation($sid, $tp, $claudePid, $nowMs) {
+  if (-not $tp) { return @{ running = $false; evidence = @() } }   # old 7-field record -> honest degrade, no overlay
   $slug = ''; try { $slug = Split-Path (Split-Path $tp -Parent) -Leaf } catch {}
   $tasksDir = if ($slug) { Join-Path $script:bgTasksRoot (Join-Path $slug (Join-Path $sid 'tasks')) } else { '' }
   $hasDir = ($tasksDir -and (Test-Path $tasksDir))
-  # B: any background-bash .output currently held open
-  $bHeld = $false
-  if ($hasDir) { foreach ($of in @(Get-ChildItem $tasksDir -Filter 'b*.output' -File -ErrorAction SilentlyContinue)) { if (BgHeld $of.FullName) { $bHeld = $true; break } } }
-  # N: pending launches, then liveness/birth guard
   $st = BgScanN $sid $tp
+  # single enumerate; ONE BgHeld probe per *.output; classify from that one cached observation. Keep
+  # shells and unknowns in separate lists so the published order is shells -> unknown -> agents.
+  $shellEv = New-Object System.Collections.Generic.List[object]
+  $unkEv = New-Object System.Collections.Generic.List[object]
+  $bHeld = $false; $seen = @{}
+  if ($hasDir) {
+    foreach ($of in @(Get-ChildItem $tasksDir -Filter '*.output' -File -ErrorAction SilentlyContinue)) {
+      $tid = $of.BaseName; $seen[$tid] = $true; $held = BgHeld $of.FullName
+      if ($of.Name -like 'b*.output') {
+        [void]$script:bgShape.Remove($tid)                          # b* are B's own, never shape-drift
+        if ($held) {
+          $bHeld = $true
+          $lab = ''; if ($st.desc.ContainsKey($tid)) { $lab = $st.desc[$tid] }
+          [void]$shellEv.Add([pscustomobject]@{ kind = 'shell'; id = $tid; label = $lab })
+        }
+      } else {
+        # non-b* .output: shape drift (a held .output N never saw a launch for), promote after >=2 passes
+        if (-not $held -or $st.known.ContainsKey($tid)) { [void]$script:bgShape.Remove($tid); continue }
+        if (-not $script:bgShape.ContainsKey($tid)) { $script:bgShape[$tid] = $nowMs }
+        elseif (($nowMs - $script:bgShape[$tid]) -ge 3000) {
+          if (-not $bHeld) { LogEv ('bgshape-drift id=' + $tid) }
+          $bHeld = $true
+          [void]$unkEv.Add([pscustomobject]@{ kind = 'unknown'; id = $tid; label = '' })   # emitted on promotion even if a b* hold already set B (G1)
+        }
+      }
+    }
+  }
+  foreach ($k in @($script:bgShape.Keys)) { if (-not $seen.ContainsKey($k)) { [void]$script:bgShape.Remove($k) } }   # prune vanished
+  # N: pending agent launches, then liveness/birth guard
+  $agentEv = New-Object System.Collections.Generic.List[object]
   $nRun = $false
   if ($st.pending.Count -gt 0) {
     $birthMs = -1
@@ -560,17 +668,28 @@ function BgRunning($sid, $tp, $claudePid, $nowMs) {
       else { foreach ($k in @($st.pending.Keys)) { $lt = $st.pending[$k]; if ($lt -gt 0 -and $lt -lt $birthMs) { [void]$st.pending.Remove($k) } } }   # pre-restart / PID-reuse
     }
     $nRun = ($st.pending.Count -gt 0)
-  }
-  # shape-drift telemetry: a held .output N never saw a launch for, surviving >=2 passes, means CC's shape moved
-  if ($hasDir) {
-    foreach ($of in @(Get-ChildItem $tasksDir -Filter '*.output' -File -ErrorAction SilentlyContinue)) {
-      $tid = $of.BaseName
-      if ($st.known.ContainsKey($tid) -or -not (BgHeld $of.FullName)) { [void]$script:bgShape.Remove($tid); continue }
-      if (-not $script:bgShape.ContainsKey($tid)) { $script:bgShape[$tid] = $nowMs }
-      elseif (($nowMs - $script:bgShape[$tid]) -ge 3000) { if (-not $bHeld) { LogEv ('bgshape-drift id=' + $tid) }; $bHeld = $true }
+    if ($nRun) {
+      foreach ($k in @($st.pending.Keys)) {
+        $lab = ''; if ($st.desc.ContainsKey($k)) { $lab = $st.desc[$k] }
+        [void]$agentEv.Add([pscustomobject]@{ kind = 'agent'; id = $k; label = $lab })
+      }
     }
   }
-  return ($bHeld -or $nRun)
+  $ev = New-Object System.Collections.Generic.List[object]
+  foreach ($x in $shellEv) { [void]$ev.Add($x) }; foreach ($x in $unkEv) { [void]$ev.Add($x) }; foreach ($x in $agentEv) { [void]$ev.Add($x) }
+  return @{ running = ($bHeld -or $nRun); evidence = @($ev.ToArray()) }
+}
+function BgRunning($sid, $tp, $claudePid, $nowMs) { return (Get-BgObservation $sid $tp $claudePid $nowMs).running }
+function Get-BgWhat($sid) { if ($script:bgEvidence.ContainsKey($sid)) { return @($script:bgEvidence[$sid]) }; return @() }
+# exact evidence compare (ids + kinds + labels, in order) -> generation counter only bumps on a real
+# change, so $sig carries an opaque integer, never command text, and no hash collision misses a rebuild (G4)
+function BgEvidenceEq($a, $b) {
+  $a = @($a); $b = @($b)
+  if ($a.Count -ne $b.Count) { return $false }
+  for ($i = 0; $i -lt $a.Count; $i++) {
+    if ("$($a[$i].kind)|$($a[$i].id)|$($a[$i].label)" -ne "$($b[$i].kind)|$($b[$i].id)|$($b[$i].label)") { return $false }
+  }
+  return $true
 }
 # Walk up the parent chain from a claude.exe PID to the first ancestor owning a real
 # top-level window (Windows Terminal, VS Code, a plain console, ...). Each ancestor must
@@ -717,7 +836,7 @@ $miSound.add_Click({ param($snd, $e) $script:soundOn = -not $script:soundOn; WU 
 $miPrivacy = New-Object System.Windows.Forms.ToolStripMenuItem
 $miPrivacy.Text = L 'privacy' 'Privacy mode'
 $miPrivacy.Checked = $script:privacy
-$miPrivacy.add_Click({ param($snd, $e) $script:privacy = -not $script:privacy; WU (Join-Path $root 'privacy.txt') ($(if ($script:privacy) { 'on' } else { 'off' })); $miPrivacy.Checked = $script:privacy; $script:lastSig = '__'; $script:fsDirty = $true })
+$miPrivacy.add_Click({ param($snd, $e) $script:privacy = -not $script:privacy; WU (Join-Path $root 'privacy.txt') ($(if ($script:privacy) { 'on' } else { 'off' })); $miPrivacy.Checked = $script:privacy; $script:lastSig = '__'; $script:fsDirty = $true; $script:privEpoch++; Hide-Tip })
 [void]$menu.Items.Add($miPrivacy)
 $miLang = New-Object System.Windows.Forms.ToolStripMenuItem
 $miLang.Text = L 'language' 'Language'
@@ -770,6 +889,7 @@ if ($script:layered) {
   # S2: a click on a card body (WM_NCHITTEST already filtered out gaps/shadow) -> jump that
   # row. $e is client (bitmap) coords; subtract the shadow pad and divide by the row pitch.
   $card.add_MouseClick({ param($snd, $e)
+    Hide-Tip
     $gm = $script:cardGeom; if (-not $gm) { return }
     $pitch = $gm.rowH + $gm.rowGap; $rel = $e.Y - $gm.pad; if ($rel -lt 0) { return }
     $ri = [int][math]::Floor($rel / $pitch)
@@ -952,8 +1072,15 @@ if ($script:layered) {
     elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $e.SuppressKeyPress = $true; Cancel-EditL }
   })
   $script:editWin.add_Deactivate({ if ($script:editing) { Commit-EditL } })   # click away -> commit
+  # hover tooltip window: a childless layered NOACTIVATE + mouse-transparent surface (see LTipWin).
+  # Created once; content is pushed via UpdateLayeredWindow on show. Handle forced now so the first
+  # push can happen while hidden (R15: never flash a stale bitmap).
+  $script:tipWin = New-Object LTipWin
+  $script:tipWin.FormBorderStyle = 'None'; $script:tipWin.ShowInTaskbar = $false; $script:tipWin.StartPosition = 'Manual'
+  [void]$script:tipWin.Handle
 }
 function Edit-Row-Layered($idx) {
+  Hide-Tip
   $sid = $script:rowSids[$idx]; if (-not $sid) { return }
   $gm = $script:cardGeom; if (-not $gm) { return }
   $cur = ''; $c = RU (Join-Path $sessDir $sid); if ($c) { $cur = ($c -split "`t")[2] }
@@ -982,6 +1109,116 @@ $stateColors = @{
   bgRunning = [System.Drawing.Color]::FromArgb(60,130,210)      # done card, but a background task still runs -> blue like thinking
 }
 
+# ---- hover tooltip (S3): reveal the FULL (untruncated, wrapped) card content + the full list of what
+# is running. Layered path only (D5). Render-time privacy (never draws command text under privacy).
+# All GDI objects disposed in try/finally (no handle leak, F13/R13); returns $null on any failure so
+# the caller simply shows nothing (honest degradation, never a lie). ----
+function Build-TipBitmap($s, $contentW, $maxH, $sc) {
+  $padX = [int](12*$sc); $padY = [int](9*$sc); $lineGap = [int](3*$sc)
+  $textW = $contentW - 2*$padX
+  if ($textW -lt [int](60*$sc)) { return $null }
+  $fTitle=$null;$fBody=$null;$fmt=$null;$scratch=$null;$mg=$null;$bmp=$null;$g=$null
+  try {
+    $fTitle = New-Object System.Drawing.Font('Microsoft YaHei UI', 10.5, [System.Drawing.FontStyle]::Bold)
+    $fBody = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
+    $fmt = New-Object System.Drawing.StringFormat
+    $fmt.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
+    $blocks = New-Object System.Collections.Generic.List[object]
+    $titleTxt = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
+    [void]$blocks.Add(@{ text=$titleTxt; font=$fTitle; color=[System.Drawing.Color]::FromArgb(255,45,45,50) })
+    $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
+    $parts=@(); if ($s.model -and ($s.key -eq 'done' -or $s.key -eq 'idle' -or $s.key -eq 'interrupted')) { $parts += $s.model }
+    $parts += $(if ($s.key -eq 'done' -and $s.bg) { Get-BgStatusLabel $s } else { L $ek $s.label })
+    if ($s.detail) { $parts += $s.detail }
+    $sc0 = $stateColors[$ek]; if (-not $sc0) { $sc0 = [System.Drawing.Color]::FromArgb(90,90,95) }
+    [void]$blocks.Add(@{ text=($parts -join ('  ' + [string][char]0x00B7 + '  ')); font=$fBody; color=[System.Drawing.Color]::FromArgb(255,$sc0.R,$sc0.G,$sc0.B) })
+    if ($s.key -eq 'done' -and $s.bg -and -not $script:privacy) {   # full running list (privacy off only, R7)
+      foreach ($it in @($s.bgWhat)) {
+        $lab = $(if ($it.label) { $it.label } else { ('(' + $it.kind + ' ' + (("$($it.id)").Substring(0,[Math]::Min(6,("$($it.id)").Length))) + ')') })
+        [void]$blocks.Add(@{ text=([string][char]0x2022 + ' ' + $lab); font=$fBody; color=[System.Drawing.Color]::FromArgb(255,90,90,95) })
+      }
+    }
+    $scratch = New-Object System.Drawing.Bitmap(1,1)
+    $mg = [System.Drawing.Graphics]::FromImage($scratch); $mg.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    $rectW = [single]$textW; $y = $padY; $drawn = New-Object System.Collections.Generic.List[object]; $overflow = 0
+    for ($bi=0; $bi -lt $blocks.Count; $bi++) {   # ONE total height budget across ALL lines (G6)
+      $blk = $blocks[$bi]
+      $bh = [int][math]::Ceiling(($mg.MeasureString($blk.text, $blk.font, [int]$rectW, $fmt)).Height)
+      if (($y + $bh + $padY) -gt $maxH -and $drawn.Count -ge 1) { $overflow = $blocks.Count - $bi; break }
+      $blk.y = $y; $blk.h = $bh; [void]$drawn.Add($blk); $y += $bh + $lineGap
+    }
+    $ovH = $(if ($overflow -gt 0) { [int](18*$sc) } else { 0 })
+    $totalH = ($y - $lineGap) + $padY + $ovH
+    $bmp = New-Object System.Drawing.Bitmap([int]$contentW, [int]$totalH, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode=[System.Drawing.Drawing2D.SmoothingMode]::AntiAlias; $g.PixelOffsetMode=[System.Drawing.Drawing2D.PixelOffsetMode]::Half
+    $g.TextRenderingHint=[System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    $rc = [int](9*$sc); $bgPath = Get-RoundPath 0 0 ($contentW-1) ($totalH-1) $rc
+    $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(252,250,249,245)); $g.FillPath($bgBrush,$bgPath); $bgBrush.Dispose()
+    $bpen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255,224,220,210),[single][Math]::Max(1,$sc)); $g.DrawPath($bpen,$bgPath); $bpen.Dispose(); $bgPath.Dispose()
+    foreach ($blk in $drawn) {
+      $br = New-Object System.Drawing.SolidBrush($blk.color)
+      $rf = New-Object System.Drawing.RectangleF([single]$padX,[single]$blk.y,[single]$rectW,[single]$blk.h)
+      $g.DrawString($blk.text, $blk.font, $br, $rf, $fmt); $br.Dispose(); $rf = $null
+    }
+    if ($overflow -gt 0) {
+      $mbr = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,150,150,155))
+      $g.DrawString(([string][char]0x2026 + ' +' + $overflow + ' more'), $fBody, $mbr, [single]$padX, [single]($totalH - $ovH)); $mbr.Dispose()
+    }
+    return @{ bmp=$bmp; w=[int]$contentW; h=[int]$totalH }
+  } catch { if ($bmp) { try { $bmp.Dispose() } catch {} }; return $null }
+  finally { if ($g) { $g.Dispose() }; if ($mg) { $mg.Dispose() }; if ($scratch) { $scratch.Dispose() }; if ($fTitle) { $fTitle.Dispose() }; if ($fBody) { $fBody.Dispose() }; if ($fmt) { $fmt.Dispose() } }
+}
+function Hide-Tip {
+  if ($script:tipWin) { try { if ($script:tipWin.Visible) { $script:tipWin.Hide() } } catch {} }
+  $script:tipShownKey = $null
+}
+function Show-Tip($row) {
+  if (-not $script:tipWin -or -not $script:cardGeom -or $row -lt 0 -or $row -ge $script:cardList.Count) { return }
+  $s = $script:cardList[$row]; $sc = $scale; $gm = $script:cardGeom
+  $rect = [Lp]::WinRect($card.Handle)
+  if ($rect[2] -le $rect[0] -or $rect[3] -le $rect[1]) { return }                 # invalid geometry -> abort (G6)
+  $wa = [System.Windows.Forms.Screen]::FromHandle($card.Handle).WorkingArea
+  $gap = [int](10*$sc); $minW = [int](130*$sc)
+  $leftRoom = ($rect[0] - $gap) - $wa.Left; $rightRoom = $wa.Right - ($rect[2] + $gap)
+  $sideW = [Math]::Max($leftRoom, $rightRoom)
+  if ($sideW -lt $minW) { return }                                               # no usable side -> abort (G6)
+  $contentW = [Math]::Min($sideW, [Math]::Min([int](560*$sc), [int]($gm.cardW * 1.7)))
+  if ($contentW -lt $minW) { return }
+  $tip = Build-TipBitmap $s $contentW ($wa.Height - [int](8*$sc)) $sc
+  if (-not $tip) { return }
+  $tx = $(if ($leftRoom -ge $tip.w) { $rect[0] - $gap - $tip.w } else { $rect[2] + $gap })   # left preferred, else right (clear of the body)
+  $ty = $rect[1] + $gm.pad + $row * ($gm.rowH + $gm.rowGap)
+  if (($ty + $tip.h) -gt $wa.Bottom) { $ty = $wa.Bottom - $tip.h }
+  if ($ty -lt $wa.Top) { $ty = $wa.Top }
+  try {
+    $script:tipWin.Size = New-Object System.Drawing.Size([int]$tip.w, [int]$tip.h)
+    [Lp]::SetBitmapStraight($script:tipWin.Handle, $tip.bmp, [int]$tx, [int]$ty)   # push while hidden (R15)
+    if (-not $script:tipWin.Visible) { $script:tipWin.Show() }
+    [Lp]::Top($script:tipWin.Handle)                                              # above the card (asserted after it, see the tick)
+    $script:tipShownKey = "$($s.sid)|$($script:tipContentGen)|$($script:privEpoch)"
+  } catch { $script:tipShownKey = $null }
+  finally { $tip.bmp.Dispose() }
+}
+# two-state dwell machine (D10/G3): HIDDEN dwells on a stable candidate key; SHOWN hides on any key
+# change or ineligibility. Key is sid-based (survives re-sort) + content-gen + privacy-epoch.
+function Update-Tip($hr, $hi) {
+  if (-not $script:layered -or -not $script:tipWin) { return }
+  $elig = ($hr -ge 0 -and $hi -eq 0 -and -not $script:dragging -and -not $script:editing -and -not $menu.Visible -and $hr -lt $script:cardList.Count)
+  $key = $null
+  if ($elig) {
+    $s = $script:cardList[$hr]
+    if (($hr -lt $script:rowTrunc.Length -and $script:rowTrunc[$hr]) -or $s.bg) { $key = "$($s.sid)|$($script:tipContentGen)|$($script:privEpoch)" } else { $elig = $false }
+  }
+  if ($script:tipShownKey) {
+    if (-not $elig -or $key -ne $script:tipShownKey) { Hide-Tip }
+  } else {
+    if (-not $elig) { $script:tipCandKey = $null }
+    elseif ($key -ne $script:tipCandKey) { $script:tipCandKey = $key; $script:tipSince = (Get-Date) }
+    elseif (((Get-Date) - $script:tipSince).TotalMilliseconds -ge $script:TIP_DWELL) { Show-Tip $hr }
+  }
+}
+
 # ---- state ----
 $script:curFrame = ''; $script:dispX = -99999; $script:dispY = -99999
 $script:bobOff = 0; $script:bobPhase = 0.0
@@ -1002,8 +1239,15 @@ $script:lastIntr = $now0
 $script:lastBg = $now0                                   # background-running detection cadence
 $script:bgState = @{}; $script:bgShape = @{}             # per-sid N-scan ledgers + shape-drift candidates
 $script:bgSids = New-Object 'System.Collections.Generic.HashSet[string]'   # sids currently overlaid "background running"
+$script:bgEvidence = @{}                                                   # sid -> @(what-is-running items); in-memory only (never persisted, R7)
+$script:bgGen = @{}                                                        # sid -> opaque generation counter (bumps only on an exact evidence change, G4)
 $script:bgTasksRoot = Join-Path $env:LOCALAPPDATA 'Temp\claude'            # %LocalAppData%\Temp\claude\<slug>\<sid>\tasks
 $script:rowBg = New-Object 'bool[]' $MAXROWS             # per-row bg-running flag (parallel to rowKeys/rowSids)
+$script:rowTrunc = New-Object 'bool[]' $MAXROWS         # per-row: was title/status ellipsized? (tooltip eligibility, F11)
+$script:tipShownKey = $null; $script:tipCandKey = $null; $script:tipSince = (Get-Date)   # hover-tooltip two-state dwell (D10/G3)
+$script:tipContentGen = 0; $script:lastContentSig = '__'   # bumps on card content change -> tooltip key invalidation
+$script:privEpoch = 0                                   # bumps on every privacy toggle -> forces tooltip hide+rebuild (G4)
+$script:TIP_DWELL = 400                                 # ms hover before the tooltip shows
 $script:fsDirty = $false
 $script:editing = $false; $script:editSid = ''
 $spinChars = @(0x280B,0x2819,0x2839,0x2838,0x283C,0x2834,0x2826,0x2827,0x2807,0x280F) | ForEach-Object { [char]$_ }
@@ -1038,7 +1282,7 @@ function Update-Card {
   $snd = (((RU (Join-Path $root 'sound.txt')) + '').Trim().ToLower() -ne 'off')
   if ($snd -ne $script:soundOn) { $script:soundOn = $snd; $miSound.Checked = $snd }
   $prv = (((RU (Join-Path $root 'privacy.txt')) + '').Trim().ToLower() -eq 'on')
-  if ($prv -ne $script:privacy) { $script:privacy = $prv; $miPrivacy.Checked = $prv; $script:lastSig = '__' }
+  if ($prv -ne $script:privacy) { $script:privacy = $prv; $miPrivacy.Checked = $prv; $script:lastSig = '__'; $script:privEpoch++; Hide-Tip }
   $list = @()
   foreach ($f in @(Get-ChildItem $sessDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.' })) {
     $c = RU $f.FullName; if (-not $c) { continue }
@@ -1059,7 +1303,9 @@ function Update-Card {
       $ttl = $b; $dtl = ''
     }
     $bgr = ($p[0] -eq 'done' -and $script:bgSids.Contains($f.Name))
-    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$ttl; detail=$dtl; epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}); bg=$bgr }
+    $bgWhatL = $(if ($bgr) { @(Get-BgWhat $f.Name) } else { @() })
+    $bgGenL = $(if ($bgr -and $script:bgGen.ContainsKey($f.Name)) { $script:bgGen[$f.Name] } else { 0 })
+    $list += [pscustomobject]@{ sid=$f.Name; key=$p[0]; label=$p[1]; title=$ttl; detail=$dtl; epoch=$epoch; model=$(if($p.Count -ge 6){$p[5]}else{''}); cpid=$(if($p.Count -ge 7){$p[6]}else{''}); bg=$bgr; bgWhat=$bgWhatL; bgGen=$bgGenL }
   }
   # minimal hybrid: float 'attention' (needs you) to the top; everything else stays newest-first
   $list = @($list | Sort-Object @{Expression={ if ($_.key -eq 'attention') { 0 } else { 1 } }}, @{Expression={ $_.epoch }; Descending=$true})
@@ -1084,7 +1330,8 @@ function Update-Card {
     return
   }
 
-  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)|$($_.cpid)|$($_.bg)" }) -join '##') + "|ov=$overflow"
+  $sig = (($list | ForEach-Object { "$($_.sid)|$($_.key)|$($_.title)|$($_.detail)|$($_.model)|$($_.cpid)|$($_.bg)|$($_.bgGen)" }) -join '##') + "|ov=$overflow"
+  if ($sig -ne $script:lastContentSig) { $script:tipContentGen++; $script:lastContentSig = $sig }   # card content changed -> invalidate any shown tooltip (D10)
   if ($script:layered) {
     # layered path: rebuild the cached shadow+static layers on any content/hover/selection
     # change; the tick composes the spinner frame and pushes. Row maps stay in sync for jump.
@@ -1113,7 +1360,7 @@ function Update-Card {
       if ($i -lt $list.Count) {
         $s = $list[$i]
         $ek = $(if ($s.key -eq 'done' -and $s.bg) { 'bgRunning' } else { $s.key })
-        $lab = L $ek $s.label
+        $lab = $(if ($s.key -eq 'done' -and $s.bg) { Get-BgStatusLabel $s } else { L $ek $s.label })
         $rowTitle[$i].Text = $(if ($s.title) { $s.title } else { L 'newSession' $s.label })
         # status line: [model badge, post-turn states only] . state . detail
         # mid-turn (thinking/attention) the badge would read as "the model currently
@@ -1163,7 +1410,7 @@ $form.add_MouseMove({ param($s,$e)
 })
 $form.add_MouseUp({ param($s,$e)
   if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and $script:dragging) { $script:dragging = $false; $form.Capture = $false; "$($script:x),$($script:y)" | Set-Content $posPath -ErrorAction SilentlyContinue }
-  elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { $menu.Show($form, $form.PointToClient([System.Windows.Forms.Cursor]::Position)) }   # owner-show keeps the menu above owned/topmost siblings
+  elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Hide-Tip; $menu.Show($form, $form.PointToClient([System.Windows.Forms.Cursor]::Position)) }   # owner-show keeps the menu above owned/topmost siblings
 })
 $form.add_DoubleClick({ if (Test-Path $collapsePath) { Remove-Item $collapsePath -Force } else { New-Item -ItemType File $collapsePath -Force | Out-Null } })
 
@@ -1209,7 +1456,7 @@ $tick.add_Tick({
   # the topmost band would cover the menu (same class of bug as the editing guard)
   if (-not $script:editing -and -not $menu.Visible -and ($now - $script:lastTop).TotalSeconds -ge 2) {
     $script:lastTop = $now
-    if ([Lp]::CanNotify()) { [Lp]::Top($form.Handle); if ($card.Visible) { [Lp]::Top($card.Handle) } }
+    if ([Lp]::CanNotify()) { [Lp]::Top($form.Handle); if ($card.Visible) { [Lp]::Top($card.Handle) }; if ($script:tipWin -and $script:tipWin.Visible) { [Lp]::Top($script:tipWin.Handle) } }   # tooltip asserted AFTER the card so it wins z-order over it
   }
   $cur = [System.Windows.Forms.Cursor]::Position
   $hover = ($cur.X -ge $script:x -and $cur.X -le ($script:x + $w) -and $cur.Y -ge $script:y -and $cur.Y -le ($script:y + $w))
@@ -1272,6 +1519,7 @@ $tick.add_Tick({
       }
     }
     if ($hr -ne $script:hoverRow -or $hi -ne $script:hoverIcon) { $script:hoverRow = $hr; $script:hoverIcon = $hi }
+    Update-Tip $hr $hi
   } else {
   # dim row action icons by default; brighten the row currently under the cursor
   $hr = -1
@@ -1380,7 +1628,10 @@ $tick.add_Tick({
   if (($now - $script:lastBg).TotalMilliseconds -ge 1500) {
     $script:lastBg = $now
     $bgNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    # build LOCALS across all done sids, then swap them together (never mutate the published maps
+    # mid-pass) so bgSids and its evidence are always the SAME observation (D8/G1)
     $newSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    $newEvidence = @{}; $newGen = @{}
     for ($i = 0; $i -lt $MAXROWS; $i++) {
       if ($script:rowKeys[$i] -ne 'done') { continue }
       $sid = $script:rowSids[$i]; if (-not $sid) { continue }
@@ -1390,11 +1641,19 @@ $tick.add_Tick({
       if ($p[0] -ne 'done') { continue }                          # re-read: row cache can lag a real change
       $tp = if ($p.Count -ge 9) { $p[8] } else { '' }
       $cpid = 0; if ($p.Count -ge 7) { [int]::TryParse($p[6], [ref]$cpid) | Out-Null }
-      if (BgRunning $sid $tp $cpid $bgNow) { [void]$newSet.Add($sid) }
+      $obs = Get-BgObservation $sid $tp $cpid $bgNow              # ONE observation -> boolean + evidence
+      if ($obs.running) {
+        [void]$newSet.Add($sid)
+        $newEvidence[$sid] = $obs.evidence
+        $prevGen = if ($script:bgGen.ContainsKey($sid)) { $script:bgGen[$sid] } else { 0 }
+        $prevEv = if ($script:bgEvidence.ContainsKey($sid)) { $script:bgEvidence[$sid] } else { @() }
+        $newGen[$sid] = if (BgEvidenceEq $prevEv $obs.evidence) { $prevGen } else { $prevGen + 1 }
+      }
     }
     $changed = ($newSet.Count -ne $script:bgSids.Count)
     if (-not $changed) { foreach ($s in $newSet) { if (-not $script:bgSids.Contains($s)) { $changed = $true; break } } }
-    $script:bgSids = $newSet
+    if (-not $changed) { foreach ($s in $newGen.Keys) { $pg = if ($script:bgGen.ContainsKey($s)) { $script:bgGen[$s] } else { 0 }; if ($newGen[$s] -ne $pg) { $changed = $true; break } } }
+    $script:bgSids = $newSet; $script:bgEvidence = $newEvidence; $script:bgGen = $newGen   # atomic swap
     if ($changed) { $script:fsDirty = $true; $script:lastSig = '__' }
   }
 })
@@ -1403,6 +1662,7 @@ $form.add_Shown({ LogEv 'resident up'; Render 'idle'; Update-Card; $tick.Start()
 [System.Windows.Forms.Application]::Run($form)
 foreach ($f in $script:frames.Values) { $f.Dispose() }
 try { $fsw.EnableRaisingEvents = $false; $fsw.Dispose() } catch {}
+try { if ($script:tipWin) { $script:tipWin.Dispose() } } catch {}
 $card.Dispose(); $form.Dispose()
 Remove-Item $pidPath -Force -ErrorAction SilentlyContinue
 try { $script:petMutex.ReleaseMutex() } catch {}

@@ -10,7 +10,7 @@ $fail = @(); function Red($m){ $script:fail += $m; Write-Host "RED  $m" }; funct
 $t=$null;$e=$null; $ast=[System.Management.Automation.Language.Parser]::ParseFile($RES,[ref]$t,[ref]$e)
 if($e.Count){ Red "resident parse error: $($e[0].Message)"; Write-Host "GUARD FAILED"; exit 1 }
 $defs = @($ast.FindAll({param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true))
-foreach($fn in 'BgHeld','BgTaskId','BgScanN','BgRunning'){
+foreach($fn in 'BgHeld','BgAgentId','BgBashId','Clean-BgLabel','BgScanN','Get-BgObservation','BgRunning'){
   $d = $defs | Where-Object { $_.Name -eq $fn } | Select-Object -First 1
   if(-not $d){ Red "function $fn not defined in resident"; continue }
   Invoke-Expression $d.Extent.Text
@@ -37,8 +37,10 @@ try {
   $fs=[IO.File]::Open($hf,'Open','ReadWrite','None')
   if(BgHeld $hf){ Grn "BgHeld held file = true" } else { Red "BgHeld missed a held file" }
   # BgTaskId extraction
-  if((BgTaskId 'Async agent launched ... agentId: aabbccddee1122') -eq 'aabbccddee1122'){ Grn "BgTaskId agentId" } else { Red "BgTaskId agentId parse" }
-  if((BgTaskId 'Command running in background with ID: bhn9vrsr5') -eq 'bhn9vrsr5'){ Grn "BgTaskId bg-bash ID" } else { Red "BgTaskId bg ID parse" }
+  if((BgAgentId 'Async agent launched ... agentId: aabbccddee1122') -eq 'aabbccddee1122'){ Grn "BgAgentId agentId" } else { Red "BgAgentId agentId parse" }
+  if((BgBashId 'Command running in background with ID: bhn9vrsr5') -eq 'bhn9vrsr5'){ Grn "BgBashId bg-bash ID" } else { Red "BgBashId bg ID parse" }
+  # G2: the agentId-only matcher must NOT grab a bg-bash ID (else an agent-branch result routes bash into pending)
+  if(-not (BgAgentId 'Command running in background with ID: bxyz123456')){ Grn "BgAgentId ignores bg-bash ID (G2)" } else { Red "BgAgentId grabbed a bg-bash ID -- N contamination" }
   # BgRunning: old 7-field record (no transcript) -> honest false, never lie
   if(-not (BgRunning $sid '' $pid0 $now)){ Grn "BgRunning old-record(no field9) = false" } else { Red "BgRunning lied on a record with no transcript" }
   # BgRunning: a held b*.output in the session's tasks dir -> running (B path)
@@ -69,13 +71,16 @@ try {
 
 # ---- static never-lie + wiring asserts on the resident text ----
 $raw = [IO.File]::ReadAllText($RES)
-$br = ($ast.FindAll({param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'BgRunning'},$true))[0].Extent.Text
+# the never-lie guards moved into Get-BgObservation (BgRunning is now a thin wrapper, D8/G1)
+$br = ($ast.FindAll({param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-BgObservation'},$true))[0].Extent.Text
 if($br -match "if \(-not \`$tp\)"){ Grn "never-lie: no-transcript -> early false" } else { Red "BgRunning missing no-transcript guard" }
 if($br -match "notlike 'claude"){ Grn "never-lie: claude-dead -> pending cleared" } else { Red "BgRunning missing claude-liveness guard" }
 if($br -match "birthMs -lt 0"){ Grn "never-lie: metadata-miss -> false" } else { Red "BgRunning missing metadata-miss guard" }
 if($br -match "lt \`$birthMs"){ Grn "birth-time guard (PID-reuse / pre-restart)" } else { Red "BgRunning missing birth-time comparison" }
 foreach($w in '\$script:rowBg','\.bg','bgRunning'){ if($raw -match $w){ Grn "wired: $w present" } else { Red "render not wired: $w missing" } }
 # i18n
-try { $j=Get-Content $STR -Raw | ConvertFrom-Json; foreach($lc in 'zh','en','ja'){ if($j.$lc.bgRunning){ Grn "strings.$lc.bgRunning = $($j.$lc.bgRunning)" } else { Red "strings.$lc.bgRunning missing" } } } catch { Red "strings.json invalid: $_" }
+# read strings.json the way the resident does (explicit UTF8): Get-Content -Raw under PS 5.1 reads a
+# no-BOM UTF-8 file as ANSI and mangles the CJK, breaking the parse -- a test artifact, not a bug
+try { $j=([IO.File]::ReadAllText($STR,(New-Object Text.UTF8Encoding($false)))) | ConvertFrom-Json; foreach($lc in 'zh','en','ja'){ if($j.$lc.bgRunning){ Grn "strings.$lc.bgRunning present" } else { Red "strings.$lc.bgRunning missing" } } } catch { Red "strings.json invalid: $_" }
 
 if($fail.Count){ Write-Host "`nGUARD FAILED: $($fail.Count) red"; exit 1 } else { Write-Host "`nGUARD PASS (bg-running knife)"; exit 0 }
