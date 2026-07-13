@@ -740,7 +740,8 @@ function Find-HostWindow([int]$startPid) {
 # Write .tmp then rename to a never-existing final name: readers only match *.json so
 # they never see a half-written file, and no path ever needs replacing. (First cut used
 # File.Replace($tmp,$dst,$null) -- PS 5.1 coerces $null to '' for string parameters,
-# so the no-backup overload ALWAYS threw 'path is not of a legal form'. Unique names
+# so the null-backup-path call ALWAYS threw 'path is not of a legal form'; both
+# Replace overloads require that parameter, there is no backup-less one. Unique names
 # also dodge any scanner briefly holding the previous request file.)
 function Write-JumpRequest([int]$cpid) {
   try {

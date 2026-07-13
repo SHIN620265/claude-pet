@@ -22,7 +22,7 @@
 ---
 
 ## 2. 环境硬约束(测错的根源,务必先懂)
-- **常驻 `pet-resident.ps1` 跑在 `powershell.exe`(5.1, STA)**;钩子脚本跑在 `pwsh`(7)。WinForms 必须 STA。
+- **常驻 `pet-resident.ps1` 跑在 `powershell.exe`(5.1, STA)**;钩子脚本跑在 `pwsh`(7)。(注:选 5.1 并非 STA 所迫——pwsh 7 在 Windows 默认即 STA 且能跑 WinForms,2026-07-13 实测。)
 - **5.1 编码坑**:5.1 把无 BOM 的 UTF-8 当 GBK 读 → 常驻源码**不能有中文/符号字面量**。所有中文来自 `strings.json` / `sessions` 文件(UTF-8 读)或 `[char]0xXXXX`。看到卡片/菜单乱码 = 这条破了。
 - **DPI**:常驻是 Per-Monitor DPI 感知。**你的截图进程也必须设 DPI 感知**,否则坐标对不上(见 §3 片段)。
 - **单实例**:常驻启动即持命名 Mutex(`ClaudePetResident`),`pet.pid` 记录当前常驻 PID。理论上不会再出现"两个常驻叠加"(历史上踩过);若见到即回归失败(T16)。

@@ -111,11 +111,11 @@
   transcript 时保留旧徽标;`/model` 切换后徽标随下一条回复自动跟上。
 
 ## 踩过的坑(重要)
-1. **5.1 编码**:常驻用 `powershell.exe`(WinForms 需 STA)。5.1 把无 BOM 的 UTF-8 当 GBK 读 →
+1. **5.1 编码**:常驻跑在 `powershell.exe`(5.1)。(注:并非"WinForms 需 STA"所迫——pwsh 7 在 Windows 默认即 STA、也能跑 WinForms,2026-07-13 实测;此处旧说法已更正。)5.1 把无 BOM 的 UTF-8 当 GBK 读 →
    `pet-resident.ps1` **源码不能放中文/符号字面量**(「·」曾变「路」)。中文一律来自 `strings.json`/`sessions`
    (`[IO.File]::ReadAllText(path,UTF8)` 读),零散符号用 `[char]0xXXXX`。
 2. **变量名大小写不敏感**:`$t`(行标签)曾覆盖 `$script:T`(语言对象)→ 别用单字母脚本级变量;i18n 用 `$script:STR`。
-3. **pwsh vs powershell**:写文件/钩子用 pwsh(UTF-8);常驻 GUI 用 powershell.exe(STA)。
+3. **pwsh vs powershell**:写文件/钩子用 pwsh(UTF-8);常驻 GUI 用 powershell.exe(5.1)。
    `!` 捕获会弄乱中文 stdout → `pet-toggle.ps1` 只输出 ASCII `on/off`,中文由模型转述。
 4. **权限**:`my-pet.md` 的 `allowed-tools` 必须匹配实际命令(`Bash(pwsh:*)`),保持最小权限。
 5. **调试截图**:常驻是 Per-Monitor DPI 感知;截图进程也要设 DPI 感知,否则坐标对不上。
@@ -138,9 +138,11 @@
     并把菜单改为 owner 形式弹出(`$menu.Show($form,…)`,owned popup 恒在 owner 之上)。以后新增任何
     菜单/tooltip/浮层,都要同步扩这个守卫。
 12. **PS 5.1 把 `$null` 塞给 .NET 的 [string] 参数会变空字符串**:`[IO.File]::Replace($tmp,$dst,$null)`
-    的"无备份"重载因此必炸 "The path is not of a legal form"(空串不是合法路径)——首测偶尔通过纯属
+    的"不留备份"用法($null 只是第三参的约定值;Replace 两个重载**都**强制要备份路径参数,**没有**
+    无备份重载)因此必炸 "The path is not of a legal form"(空串不是合法路径)——首测偶尔通过纯属
     目标文件恰好不存在走了 Move-Item 分支,连点第二下即败。凡 .NET API 的可空 string 参数:换不含该参
-    的重载、传 `[NullString]::Value`,或干脆改用不需要空值语义的方案(跳转握手最终用唯一文件名 rename)。
+    的重载(若该 API 真提供——`File.Replace` 就不提供)、传 `[NullString]::Value`,或干脆改用不需要
+    空值语义的方案(跳转握手最终用唯一文件名 rename)。
 13. **展示过期 ≠ 数据删除**:TTL 曾"过期即删",把首句标题和 `.titlelock` 改名一并冲掉——会话复活后
     标题变成最新输入,违反自家坑 8 的"用户标题不可冲"原则。1.0.9 拆成两层:30 分钟只**隐藏**
     (跳过渲染,文件保留),7 天才物理删除;`SessionEnd` 从删文件改为**把 epoch 拨老**(立即隐藏但保留记忆,
